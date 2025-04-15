@@ -13,9 +13,26 @@ version = "0.1.0"
 packages = [{include = "genjax_examples", from = "src"}]
 
 [tool.poetry.group.dev.dependencies]
-pytest = "^8.3.5"
 pandas-stubs = "^2.2.3.250308"
+pytest = "^8.3.5"
 
 [build-system]
 build-backend = "poetry.core.masonry.api"
 requires = ["poetry-core>=2.0.0,<3.0.0"]
+
+[tool.mypy]
+allow_redefinition = true
+check_untyped_defs = true
+explicit_package_bases = true
+files = ["."]
+follow_imports = "normal"
+ignore_errors = true
+ignore_missing_imports = true
+local_partial_types = true
+namespace_packages = true
+python_version = "3.11"
+show_column_numbers = true
+show_error_codes = true
+warn_redundant_casts = true
+warn_return_any = true
+warn_unused_configs = true

@@ -2,9 +2,10 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-from genjax import Arguments, Const, flip, gen, normal  # type: ignore
+from genjax import Arguments, Const, flip, gen, normal, ChoiceMap  # type: ignore
 from jax import jit, vmap
 from jaxtyping import Array, Float, PRNGKeyArray
+from tests.test_mcmc import run_inference
 
 MAX_DEPTH = 5
 global depth
@@ -64,3 +65,17 @@ def test_binary_tree():
     )
 
     assert trace.retval.shape == (200,)
+
+
+def test_binary_tree_inference():
+    key = jax.random.PRNGKey(42)
+
+    obs = ChoiceMap.d({"y": 5.0})
+    model_args = (
+        Const(1),  # initial node_id
+        jnp.array(0.3),  # branch_prob
+    )
+
+    num_samples = 1
+    key, subkey = jax.random.split(key)
+    trace, mh_chain = run_inference(model, model_args, obs, subkey, num_samples)

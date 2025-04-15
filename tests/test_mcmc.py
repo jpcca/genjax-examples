@@ -37,8 +37,7 @@ def metropolis_hastings_move(mh_args, key):
 
 @gen
 def prop(tr, *_):
-    orig_a = tr.get_choices()["a"]
-    a = normal(orig_a, 1.0) @ "a"
+    a = normal(0.0, 1.0)
     return a
 
 
