@@ -14,6 +14,7 @@ packages = [{include = "genjax_examples", from = "src"}]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.5"
+pandas-stubs = "^2.2.3.250308"
 
 [build-system]
 build-backend = "poetry.core.masonry.api"

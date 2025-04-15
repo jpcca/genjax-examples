@@ -33,7 +33,9 @@ def metropolis_hastings_move(mh_args, key):
     bwd_weight, _ = proposal.assess(discard, proposal_args_backward)
     α = weight - fwd_weight + bwd_weight
     key, subkey = jax.random.split(key)
-    ret_fun = jax.lax.cond(jnp.log(jax.random.uniform(subkey)) < α, lambda: new_trace, lambda: trace)
+    ret_fun = jax.lax.cond(
+        jnp.log(jax.random.uniform(subkey)) < α, lambda: new_trace, lambda: trace
+    )
     return (ret_fun, model, proposal, proposal_args, observations), ret_fun
 
 
@@ -69,8 +71,7 @@ def run_inference(model, model_args, obs, key, num_samples):
 
 
 @gen
-def model():
-    x = normal(0.0, 10.0) @ "x"
+def model(x):
     a = normal(0.0, 5.0) @ "a"
     b = normal(0.0, 1.0) @ "b"
     y = normal(a * x + b, 1.0) @ "y"
@@ -80,18 +81,9 @@ def model():
 def test_mcmc():
     key = jax.random.PRNGKey(42)
 
-    # Load data
-    x_training = jnp.asarray(pd.read_csv("tests/data/x_training.csv").values)
-    y_training = jnp.asarray(pd.read_csv("tests/data/y_training.csv").values)
-
-    obs = ChoiceMap.d({"x": x_training, "y": y_training})
-    model_args = ()
+    obs = ChoiceMap.d({"y": 5.0})
+    model_args = (5.0,)
 
     num_samples = 1
     key, subkey = jax.random.split(key)
     trace, mh_chain = run_inference(model, model_args, obs, subkey, num_samples)
-
-    plt.plot(mh_chain.get_choices()["x"], mh_chain.get_choices()["y"], color="r")
-    plt.plot(x_training, y_training, color="k")
-    plt.savefig("mh_chain.png")
-    plt.close()
