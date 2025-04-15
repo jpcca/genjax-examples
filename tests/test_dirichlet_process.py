@@ -50,7 +50,7 @@ def generate_datapoints(probs, clusters, n_datapoints):
 
 # Main model
 @gen
-def generate_data(n_clusters: Const[int], n_datapoints: Const[int], alpha: float):
+def generate_data(n_clusters: Const[int], n_datapoints: Const[int], alpha: float):  # type: ignore
     clusters = (
         generate_cluster.repeat(n=n_clusters.unwrap())(PRIOR_MEAN, PRIOR_VARIANCE)
         @ "clusters"
