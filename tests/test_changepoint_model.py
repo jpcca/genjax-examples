@@ -6,7 +6,7 @@ from abc import ABC
 from dataclasses import dataclass
 
 import jax
-from genjax import beta, flip, gen, normal  # type: ignore[import]
+from genjax import beta, flip, gen, normal  # type: ignore
 from jaxtyping import Array, Float
 
 MAX_DEPTH = 5

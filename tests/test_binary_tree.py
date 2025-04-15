@@ -2,10 +2,7 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-import matplotlib.pyplot as plt
-import pandas as pd
-from genjax import Arguments, ChoiceMap, Const, flip, gen, normal
-from genjax._src.core.compiler.interpreters.incremental import Diff
+from genjax import Arguments, Const, flip, gen, normal  # type: ignore
 from jax import jit, vmap
 from jaxtyping import Array, Float, PRNGKeyArray
 

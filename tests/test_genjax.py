@@ -2,7 +2,7 @@ from functools import partial
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
-from genjax import Arguments, ChoiceMap, Weight, gen, normal
+from genjax import Arguments, ChoiceMap, Weight, gen, normal  # type: ignore
 from jax import jit, random, vmap
 from jax.scipy.special import logsumexp
 from jax.scipy.stats import gaussian_kde

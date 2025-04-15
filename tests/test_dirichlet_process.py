@@ -1,10 +1,9 @@
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 import genjax
-from genjax import ChoiceMapBuilder as C
-from genjax import categorical, dirichlet, gen, normal
+from genjax import ChoiceMapBuilder as C  # type: ignore
+from genjax import categorical, dirichlet, gen, normal  # type: ignore
 from genjax._src.core.pytree import Const
 
 key = jax.random.key(0)
