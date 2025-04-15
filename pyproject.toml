@@ -1,0 +1,20 @@
+[project]
+authors = [
+  {name = "gszep", email = "grisha.szep@gmail.com"},
+]
+dependencies = ["genjax (>=0.10.3,<0.11.0)", "jax[cuda12] (>=0.5.3,<0.6.0)", "matplotlib (>=3.10.1,<4.0.0)", "pandas (>=2.2.3,<3.0.0)"]
+description = ""
+name = "genjax-examples"
+readme = "README.md"
+requires-python = ">=3.11,<4.0"
+version = "0.1.0"
+
+[tool.poetry]
+packages = [{include = "genjax_examples", from = "src"}]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.5"
+
+[build-system]
+build-backend = "poetry.core.masonry.api"
+requires = ["poetry-core>=2.0.0,<3.0.0"]
