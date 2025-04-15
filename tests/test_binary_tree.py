@@ -69,6 +69,14 @@ def test_binary_tree():
 
 def test_binary_tree_inference():
     key = jax.random.PRNGKey(42)
+    keys = jax.random.split(jax.random.PRNGKey(42), 200)
+    simulate(
+        keys,
+        (
+            Const(1),  # initial node_id
+            jnp.array(0.3),  # branch_prob
+        ),
+    )
 
     obs = ChoiceMap.d({"y": 5.0})
     model_args = (
