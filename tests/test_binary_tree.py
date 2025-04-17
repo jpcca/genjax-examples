@@ -54,6 +54,28 @@ def simulate(key: PRNGKeyArray, args: Arguments):
     return model.simulate(key, args)
 
 
+def test_binary_tree_inference():
+    key = jax.random.PRNGKey(42)
+    keys = jax.random.split(jax.random.PRNGKey(42), 200)
+    # simulate(
+    #     keys,
+    #     (
+    #         Const(1),  # initial node_id
+    #         jnp.array(0.3),  # branch_prob
+    #     ),
+    # )
+
+    obs = ChoiceMap.d({"y": 5.0})
+    model_args = (
+        Const(1),  # initial node_id
+        jnp.array(0.3),  # branch_prob
+    )
+
+    num_samples = 1
+    key, subkey = jax.random.split(key)
+    trace, mh_chain = run_inference(model, model_args, obs, subkey, num_samples)
+
+
 def test_binary_tree():
     keys = jax.random.split(jax.random.PRNGKey(42), 200)
     trace = simulate(
@@ -65,25 +87,3 @@ def test_binary_tree():
     )
 
     assert trace.retval.shape == (200,)
-
-
-def test_binary_tree_inference():
-    key = jax.random.PRNGKey(42)
-    keys = jax.random.split(jax.random.PRNGKey(42), 200)
-    simulate(
-        keys,
-        (
-            Const(1),  # initial node_id
-            jnp.array(0.3),  # branch_prob
-        ),
-    )
-
-    obs = ChoiceMap.d({"y": 5.0})
-    model_args = (
-        Const(1),  # initial node_id
-        jnp.array(0.3),  # branch_prob
-    )
-
-    num_samples = 1
-    key, subkey = jax.random.split(key)
-    trace, mh_chain = run_inference(model, model_args, obs, subkey, num_samples)
