@@ -2,7 +2,13 @@
 authors = [
   {name = "gszep", email = "grisha.szep@gmail.com"},
 ]
-dependencies = ["genjax (>=0.10.3,<0.11.0)", "jax[cuda12] (>=0.5.3,<0.6.0)", "matplotlib (>=3.10.1,<4.0.0)", "pandas (>=2.2.3,<3.0.0)"]
+dependencies = [
+    "genjax (>=0.10.3,<0.11.0)",
+    "jax[cuda12] (>=0.5.3,<0.6.0); sys_platform != 'darwin'",
+    "jax (>=0.5.3,<0.6.0); sys_platform == 'darwin'",
+    "matplotlib (>=3.10.1,<4.0.0)",
+    "pandas (>=2.2.3,<3.0.0)"
+]
 description = ""
 name = "genjax-examples"
 readme = "README.md"
