@@ -233,8 +233,6 @@ def test_mvn_entropy():
         )
     )
 
-    print(f"Results for H(Z_{target_idx_to_estimate}):")
-    print(f"  Analytical Entropy          : {analytical_H:.4f}")
-    print(f"  Estimated Lower Bound (SIR) : {lower_bound_H:.4f}")
-    print(f"  Estimated Upper Bound (SIR) : {upper_bound_H:.4f}")
-    print(f"  Width of Bounds             : {upper_bound_H - lower_bound_H:.4f}")
+    assert (
+        lower_bound_H <= analytical_H <= upper_bound_H
+    ), "The analytical entropy should be between the lower and upper bounds."
