@@ -205,7 +205,7 @@ def test_mvn_entropy():
     # --- Demo Configuration ---
     dim_z = 2
     target_idx_to_estimate = 0  # Estimate H(Z_0)
-    n_outer_samples = 1000  # Number of samples for E[...] (outer loop)
+    n_outer_samples = 10000  # Number of samples for E[...] (outer loop)
     P_sir_particles = 100  # Number of particles for SIR (inner loop)
 
     # Define simple MVN parameters
