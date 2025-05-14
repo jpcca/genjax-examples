@@ -56,7 +56,6 @@ def simulate(key: PRNGKeyArray, args: Arguments):
 
 def test_binary_tree_inference():
     key = jax.random.PRNGKey(42)
-    keys = jax.random.split(jax.random.PRNGKey(42), 200)
     # simulate(
     #     keys,
     #     (
