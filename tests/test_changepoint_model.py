@@ -7,12 +7,12 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
-from genjax import beta, flip, gen, normal, Trace  # type: ignore
+from genjax import beta, flip, gen, scan, normal, Trace  # type: ignore
 from jaxtyping import Array, Float, Bool, Integer
 
 from matplotlib import pyplot as plt
 
-MAX_DEPTH = 10
+MAX_DEPTH = 5
 MAX_NODES = 2**MAX_DEPTH - 1
 
 
@@ -110,8 +110,11 @@ def branch(buffer: TreeBuffer, slot, low, up, depth) -> TreeBuffer:
     return buffer
 
 
+@scan(n=MAX_NODES)
 @gen
-def generate_segments(buffer: TreeBuffer) -> TreeBuffer:
+def generate_segments(
+    buffer: TreeBuffer, stack: None = None
+) -> tuple[TreeBuffer, None]:
 
     slot = buffer.ptr - 1
     low = buffer.lower[slot]
@@ -120,48 +123,51 @@ def generate_segments(buffer: TreeBuffer) -> TreeBuffer:
 
     args = (buffer, slot, low, up, depth)
     is_leaf = flip(0.7) @ f"is_leaf_{slot}"
-    leaf.or_else(branch)(
-        is_leaf | (depth >= MAX_DEPTH), args, args
-    ) @ f"buffer_idx_{slot}"
-    return ()
-
-
-@gen
-def generate_segments_scan(lower: int, upper: int) -> TreeBuffer:
-
-    buffer, _ = jax.lax.scan(
-        generate_segments,
-        TreeBuffer(
-            lower=jnp.zeros([MAX_NODES]).at[0].set(lower),
-            upper=jnp.ones([MAX_NODES]).at[0].set(upper),
-            depth=jnp.zeros([MAX_NODES], dtype=jnp.int32),
-            ptr=1,
-            node_lower=jnp.zeros([MAX_NODES]),
-            node_upper=jnp.zeros([MAX_NODES]),
-            is_leaf=jnp.zeros([MAX_NODES], dtype=bool),
-            values=jnp.zeros([MAX_NODES]),
-            left_idx=-jnp.ones([MAX_NODES], dtype=jnp.int32),
-            right_idx=-jnp.ones([MAX_NODES], dtype=jnp.int32),
-            next_node=0,
-        ),
-        xs=None,
-        length=MAX_NODES,
+    buffer = (
+        leaf.or_else(branch)(is_leaf | (depth >= MAX_DEPTH), args, args)
+        @ f"leaf_or_else_branch_{slot}"
     )
-    return buffer
+    return buffer, stack
 
 
 def test_changepoint_model():
 
-    for i in range(10):
-        key = jax.random.PRNGKey(i)
-        trace: Trace = generate_segments_scan.simulate(key, (0.0, 1.0))
+    fig, ax = plt.subplots(1, 1)
+    plt.title("Changepoint Segments")
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.xlim(0, 1)
+    plt.ylim(-3, 3)
 
-        render_segments_trace(trace)
-    plt.savefig("test_changepoint_model.png")
+    c = ["red", "blue", "green", "orange", "purple", "brown"]
+    for i in range(6):
+        key = jax.random.PRNGKey(i)
+        trace: Trace = generate_segments.simulate(
+            key,
+            (
+                TreeBuffer(
+                    lower=jnp.zeros([MAX_NODES]).at[0].set(0.0),
+                    upper=jnp.zeros([MAX_NODES]).at[0].set(1.0),
+                    depth=jnp.zeros([MAX_NODES], dtype=jnp.int32).at[0].set(0),
+                    ptr=1,
+                    node_lower=jnp.zeros([MAX_NODES]),
+                    node_upper=jnp.zeros([MAX_NODES]),
+                    is_leaf=jnp.zeros([MAX_NODES], dtype=bool),
+                    values=jnp.zeros([MAX_NODES]),
+                    left_idx=-jnp.ones([MAX_NODES], dtype=jnp.int32),
+                    right_idx=-jnp.ones([MAX_NODES], dtype=jnp.int32),
+                    next_node=0,
+                ),
+                None,
+            ),
+        )
+
+        render_segments_trace(ax, trace, color=c[i])
+    fig.savefig("test_changepoint_model.png")
 
 
 # cpu-side, recursive tree builder
-def build_tree(tree_buffer: TreeBuffer, idx: int = 0) -> Node:
+def tree_unflatten(tree_buffer: TreeBuffer, idx: int = 0) -> Node:
     if tree_buffer.is_leaf[idx]:
         return LeafNode(
             value=tree_buffer.values[idx],
@@ -169,35 +175,31 @@ def build_tree(tree_buffer: TreeBuffer, idx: int = 0) -> Node:
         )
     else:
         return InternalNode(
-            left=build_tree(tree_buffer, tree_buffer.left_idx[idx]),
-            right=build_tree(tree_buffer, tree_buffer.right_idx[idx]),
+            left=tree_unflatten(tree_buffer, tree_buffer.left_idx[idx]),
+            right=tree_unflatten(tree_buffer, tree_buffer.right_idx[idx]),
             interval=Interval(tree_buffer.node_lower[idx], tree_buffer.node_upper[idx]),
         )
 
 
-def render_node(node: Node) -> None:
+def render_node(ax: plt.Axes, node: Node, color: str) -> None:
     match node:
         case LeafNode():
-            plt.plot(
+            ax.plot(
                 [node.interval.lower, node.interval.upper],
                 [node.value, node.value],
                 linewidth=5,
+                color=color,
             )
         case InternalNode():
-            render_node(node.left)
-            render_node(node.right)
+            render_node(ax, node.left, color)
+            render_node(ax, node.right, color)
 
         case _:
             raise ValueError(f"Unknown node type: {type(node)}")
 
 
-def render_segments_trace(trace: Trace) -> None:
-    tree = build_tree(trace.retval)
+def render_segments_trace(ax: plt.Axes, trace: Trace, color: str) -> None:
+    buffer, _ = trace.retval
+    tree = tree_unflatten(buffer)
 
-    plt.figure(figsize=(10, 5))
-    plt.title("Changepoint Segments")
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.xlim(0, 1)
-    plt.ylim(-3, 3)
-    render_node(tree)
+    render_node(ax, tree, color)
