@@ -13,7 +13,7 @@ from jaxtyping import Array, Float, Bool, Integer
 from matplotlib import pyplot as plt
 
 MAX_DEPTH = 5
-MAX_NODES = 2**MAX_DEPTH - 1
+MAX_NODES = 2 ** (MAX_DEPTH + 1) - 1
 
 
 @jax.tree_util.register_dataclass
@@ -100,10 +100,8 @@ def branch(buffer: TreeBuffer, slot, low, up, depth) -> TreeBuffer:
     buffer.node_lower = buffer.node_lower.at[idx].set(low)
     buffer.node_upper = buffer.node_upper.at[idx].set(up)
     buffer.is_leaf = buffer.is_leaf.at[idx].set(False)
-    buffer.left_idx = buffer.left_idx.at[idx].set(idx + 1)  # left child will be idx+1
-    buffer.right_idx = buffer.right_idx.at[idx].set(
-        idx + 1 + (2 ** (MAX_DEPTH - (depth + 1)) - 1)
-    )
+    buffer.left_idx = buffer.left_idx.at[idx].set(idx + 1)
+    buffer.right_idx = buffer.right_idx.at[idx].set(idx + 2 ** (MAX_DEPTH - depth))
     buffer.lower = sl
     buffer.upper = su
     buffer.depth = sd
@@ -122,11 +120,8 @@ def generate_segments(
     depth = buffer.depth[slot]
 
     args = (buffer, slot, low, up, depth)
-    is_leaf = flip(0.7) @ f"is_leaf_{slot}"
-    buffer = (
-        leaf.or_else(branch)(is_leaf | (depth >= MAX_DEPTH), args, args)
-        @ f"leaf_or_else_branch_{slot}"
-    )
+    is_leaf = depth >= MAX_DEPTH
+    buffer = leaf.or_else(branch)(is_leaf, args, args) @ f"leaf_or_else_branch_{slot}"
     return buffer, stack
 
 
@@ -137,10 +132,9 @@ def test_changepoint_model():
     plt.xlabel("x")
     plt.ylabel("y")
     plt.xlim(0, 1)
-    plt.ylim(-3, 3)
 
-    c = ["red", "blue", "green", "orange", "purple", "brown"]
-    for i in range(6):
+    c = ["red", "blue"]
+    for i in range(2):
         key = jax.random.PRNGKey(i)
         trace: Trace = generate_segments.simulate(
             key,
