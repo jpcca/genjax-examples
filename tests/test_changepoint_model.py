@@ -14,7 +14,7 @@ from jaxtyping import Array, Float, Bool, Integer, PRNGKeyArray
 
 from matplotlib import pyplot as plt
 
-MAX_DEPTH = 2
+MAX_DEPTH = 5
 MAX_NODES = 2 ** (MAX_DEPTH + 1) - 1
 
 
@@ -48,7 +48,7 @@ class LeafNode(Node):
 
 @jax.tree_util.register_dataclass
 @dataclass
-class TreeBuffer:
+class NodeBuffer:
 
     lower: Float[Array, "MAX_NODES"]
     upper: Float[Array, "MAX_NODES"]
@@ -80,7 +80,7 @@ class TreeBuffer:
 
 
 @gen
-def leaf(buffer: TreeBuffer, idx: int) -> tuple[TreeBuffer, int]:
+def leaf(buffer: NodeBuffer, idx: int) -> tuple[NodeBuffer, int]:
 
     value = normal(0.0, 1.0) @ f"value_{idx}"
     buffer.values = buffer.values.at[idx].set(value)
@@ -90,34 +90,11 @@ def leaf(buffer: TreeBuffer, idx: int) -> tuple[TreeBuffer, int]:
     return buffer, idx
 
 
-def _leaf(buffer: TreeBuffer, idx: int, value: float) -> tuple[TreeBuffer, int]:
-    buffer.values = buffer.values.at[idx].set(value)
-
-    buffer.left_idx = buffer.left_idx.at[idx].set(-1)
-    buffer.right_idx = buffer.right_idx.at[idx].set(-1)
-    return buffer, idx
-
-
 @gen
-def branch(buffer: TreeBuffer, idx: int) -> tuple[TreeBuffer, int]:
+def branch(buffer: NodeBuffer, idx: int) -> tuple[NodeBuffer, int]:
     lower, upper = buffer.lower[idx], buffer.upper[idx]
 
     frac = beta(2.0, 2.0) @ f"beta_{idx}"
-    midpoint = lower + frac * (upper - lower)
-    left, right = buffer.left_idx[idx], buffer.right_idx[idx]
-
-    buffer.lower = buffer.lower.at[left].set(lower)
-    buffer.upper = buffer.upper.at[left].set(midpoint)
-
-    buffer.lower = buffer.lower.at[right].set(midpoint)
-    buffer.upper = buffer.upper.at[right].set(upper)
-
-    return buffer, idx
-
-
-def _branch(buffer: TreeBuffer, idx: int, frac: float) -> tuple[TreeBuffer, int]:
-    lower, upper = buffer.lower[idx], buffer.upper[idx]
-
     midpoint = lower + frac * (upper - lower)
     left, right = buffer.left_idx[idx], buffer.right_idx[idx]
 
@@ -132,32 +109,19 @@ def _branch(buffer: TreeBuffer, idx: int, frac: float) -> tuple[TreeBuffer, int]
 
 @scan(n=MAX_NODES)  # in breadth-first search order
 @gen
-def binary_tree(buffer: TreeBuffer, idx: int) -> tuple[TreeBuffer, int]:
+def binary_tree(buffer: NodeBuffer, idx: int) -> tuple[NodeBuffer, int]:
     args = (buffer, idx)
 
-    frac = beta(2.0, 2.0) @ f"beta_{idx}"
-    value = normal(0.0, 1.0) @ f"value_{idx}"
     is_leaf = flip(0.5) @ f"is_leaf_{idx}"
-
-    buffer, idx = jax.lax.cond(
-        buffer.is_leaf[idx] | is_leaf,
-        lambda buffer, idx: _leaf(buffer, idx, value),
-        lambda buffer, idx: _branch(buffer, idx, frac),
-        *args,
+    return (
+        leaf.or_else(branch)(buffer.is_leaf[idx] | is_leaf, args, args)
+        @ f"leaf_or_else_branch_{idx}"
     )
-
-    # buffer, idx = (
-    #     leaf.or_else(branch)(
-    #         is_leaf, args, args
-    #     )
-    #     @ f"leaf_or_else_branch_{idx}"
-    # )
-    return buffer, idx
 
 
 @jit
 @partial(vmap, in_axes=(0, None))
-def sample_binary_tree(key: PRNGKeyArray, buffer: TreeBuffer) -> Trace:
+def sample_binary_tree(key: PRNGKeyArray, buffer: NodeBuffer) -> Trace:
     return binary_tree.simulate(key, args=(buffer, buffer.idx))
 
 
@@ -167,7 +131,7 @@ def test_changepoint_model():
 
     trace: Trace = sample_binary_tree(
         jax.random.split(jax.random.PRNGKey(42), N),
-        TreeBuffer(
+        NodeBuffer(
             lower=jnp.zeros([MAX_NODES]).at[0].set(0.0),
             upper=jnp.zeros([MAX_NODES]).at[0].set(1.0),
             values=jnp.zeros([MAX_NODES]),
@@ -191,7 +155,7 @@ def test_changepoint_model():
 
 
 # cpu-side, recursive tree builder
-def tree_unflatten(tree_buffer: TreeBuffer, j: int, idx: int = 0) -> Node:
+def tree_unflatten(tree_buffer: NodeBuffer, j: int, idx: int = 0) -> Node:
     if tree_buffer.is_leaf[j, idx]:
         return LeafNode(
             idx=idx,
