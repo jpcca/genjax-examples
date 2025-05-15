@@ -3,7 +3,7 @@ GenJAX changepoint model example from https://www.gen.dev/tutorials/intro-to-mod
 """
 
 from abc import ABC
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import jax
 import jax.numpy as jnp
@@ -47,82 +47,87 @@ class LeafNode(Node):
 @jax.tree_util.register_dataclass
 @dataclass
 class TreeBuffer:
-    # a “stack” of intervals to process:
     lower: Float[Array, "MAX_NODES"]
     upper: Float[Array, "MAX_NODES"]
-    depth: Float[Array, "MAX_NODES"]
-    ptr: jnp.integer  # next free slot in the stack
+    values: Float[Array, "MAX_NODES"]
 
-    # buffers for the nodes we build:
-    node_lower: Float[Array, "MAX_NODES"]  # shape [MAX_NODES]
-    node_upper: Float[Array, "MAX_NODES"]  # shape [MAX_NODES]
-    is_leaf: Bool[Array, "MAX_NODES"]  # shape [MAX_NODES], bool
-    values: Float[Array, "MAX_NODES"]  # shape [MAX_NODES]    (only for leaves)
-    left_idx: Integer[Array, "MAX_NODES"]  # shape [MAX_NODES], int32
-    right_idx: Integer[Array, "MAX_NODES"]  # shape [MAX_NODES], int32
+    idx: Integer[Array, "MAX_NODES"] = field(  # in breadth-first search order
+        default_factory=lambda: jnp.arange(MAX_NODES, dtype=jnp.int32)
+    )
 
-    next_node: jnp.integer  # next free index in the node buffers
+    children: Integer[Array, "MAX_NODES 2"] = field(
+        default_factory=lambda: jnp.full((MAX_NODES, 2), -1, dtype=jnp.int32)
+    )
+
+    def __post_init__(self):
+        idx = jnp.arange(MAX_NODES, dtype=jnp.int32)
+
+        # begin with a full binary tree
+        self.children = jnp.stack([2 * idx + 1, 2 * idx + 2], axis=-1)
+        self.children = jnp.where(self.children < MAX_NODES, self.children, -1)
+
+    @property
+    def is_leaf(self) -> Bool[Array, "MAX_NODES"]:
+        return (self.children == -1).all(axis=-1)
 
 
 @gen
-def leaf(buffer: TreeBuffer, slot, low, up, depth) -> TreeBuffer:
-    idx = buffer.next_node
-    buffer.ptr = slot  # consumed one
-    buffer.next_node = idx + 1
-    buffer.node_lower = buffer.node_lower.at[idx].set(low)
-    buffer.node_upper = buffer.node_upper.at[idx].set(up)
-    buffer.is_leaf = buffer.is_leaf.at[idx].set(True)
+def leaf(buffer: TreeBuffer, idx: int) -> tuple[TreeBuffer, int]:
 
-    value = normal(0.0, 1.0) @ f"value_{slot}"
+    value = normal(0.0, 1.0) @ f"value_{idx}"
     buffer.values = buffer.values.at[idx].set(value)
-    return buffer
+
+    buffer.children = buffer.children.at[idx].set(-1)
+    return buffer, idx
 
 
 @gen
-def branch(buffer: TreeBuffer, slot, low, up, depth) -> TreeBuffer:
-    idx = buffer.next_node
-    frac = beta(2.0, 2.0) @ f"beta_{slot}"
-    mid = low + frac * (up - low)
-    # push right child then left child onto the stack:
-    new_ptr = slot + 2
-    sl = buffer.lower
-    su = buffer.upper
-    sd = buffer.depth
-    sl = sl.at[slot].set(low)
-    su = su.at[slot].set(mid)
-    sd = sd.at[slot].set(depth + 1)
-    sl = sl.at[slot + 1].set(mid)
-    su = su.at[slot + 1].set(up)
-    sd = sd.at[slot + 1].set(depth + 1)
+def branch(buffer: TreeBuffer, idx: int) -> tuple[TreeBuffer, int]:
+    lower, upper = buffer.lower[idx], buffer.upper[idx]
 
-    buffer.ptr = new_ptr
-    buffer.next_node = idx + 1
-    buffer.node_lower = buffer.node_lower.at[idx].set(low)
-    buffer.node_upper = buffer.node_upper.at[idx].set(up)
-    buffer.is_leaf = buffer.is_leaf.at[idx].set(False)
-    buffer.left_idx = buffer.left_idx.at[idx].set(idx + 1)
-    buffer.right_idx = buffer.right_idx.at[idx].set(idx + 2 ** (MAX_DEPTH - depth))
-    buffer.lower = sl
-    buffer.upper = su
-    buffer.depth = sd
-    return buffer
+    frac = beta(2.0, 2.0) @ f"beta_{idx}"
+    midpoint = lower + frac * (upper - lower)
+
+    left, right = buffer.children[idx]
+
+    buffer.lower = buffer.lower.at[left].set(lower)
+    buffer.upper = buffer.upper.at[left].set(midpoint)
+
+    buffer.lower = buffer.lower.at[right].set(midpoint)
+    buffer.upper = buffer.upper.at[right].set(upper)
+
+    return buffer, idx
 
 
-@scan(n=MAX_NODES)
+@scan(n=MAX_NODES)  # in breadth-first search order
 @gen
-def generate_segments(
-    buffer: TreeBuffer, stack: None = None
-) -> tuple[TreeBuffer, None]:
+def binary_tree(buffer: TreeBuffer, idx: int) -> tuple[TreeBuffer, int]:
 
-    slot = buffer.ptr - 1
-    low = buffer.lower[slot]
-    up = buffer.upper[slot]
-    depth = buffer.depth[slot]
+    frac = beta(2.0, 2.0) @ f"beta_{idx}"
+    value = normal(0.0, 1.0) @ f"value_{idx}"
 
-    args = (buffer, slot, low, up, depth)
-    is_leaf = depth >= MAX_DEPTH
-    buffer = leaf.or_else(branch)(is_leaf, args, args) @ f"leaf_or_else_branch_{slot}"
-    return buffer, stack
+    buffer.values = buffer.values.at[idx].set(value)
+
+    lower, upper = buffer.lower[idx], buffer.upper[idx]
+    midpoint = lower + frac * (upper - lower)
+
+    left, right = buffer.children[idx]
+
+    buffer.lower = buffer.lower.at[left].set(lower)
+    buffer.upper = buffer.upper.at[left].set(midpoint)
+
+    buffer.lower = buffer.lower.at[right].set(midpoint)
+    buffer.upper = buffer.upper.at[right].set(upper)
+
+    # args = (buffer, idx)
+    # is_leaf = flip(0.7) @ f"is_leaf_{idx}"
+    # buffer, idx = (
+    #     leaf.or_else(branch)(
+    #         is_leaf | (jnp.floor(jnp.log2(idx + 1)) > MAX_DEPTH), args, args
+    #     )
+    #     @ f"leaf_or_else_branch_{idx}"
+    # )
+    return buffer, idx
 
 
 def test_changepoint_model():
@@ -135,25 +140,16 @@ def test_changepoint_model():
 
     c = ["red", "blue"]
     for i in range(2):
+
         key = jax.random.PRNGKey(i)
-        trace: Trace = generate_segments.simulate(
+        buffer = TreeBuffer(
+            lower=jnp.zeros([MAX_NODES]).at[0].set(0.0),
+            upper=jnp.zeros([MAX_NODES]).at[0].set(1.0),
+            values=jnp.zeros([MAX_NODES]),
+        )
+        trace: Trace = binary_tree.simulate(
             key,
-            (
-                TreeBuffer(
-                    lower=jnp.zeros([MAX_NODES]).at[0].set(0.0),
-                    upper=jnp.zeros([MAX_NODES]).at[0].set(1.0),
-                    depth=jnp.zeros([MAX_NODES], dtype=jnp.int32).at[0].set(0),
-                    ptr=1,
-                    node_lower=jnp.zeros([MAX_NODES]),
-                    node_upper=jnp.zeros([MAX_NODES]),
-                    is_leaf=jnp.zeros([MAX_NODES], dtype=bool),
-                    values=jnp.zeros([MAX_NODES]),
-                    left_idx=-jnp.ones([MAX_NODES], dtype=jnp.int32),
-                    right_idx=-jnp.ones([MAX_NODES], dtype=jnp.int32),
-                    next_node=0,
-                ),
-                None,
-            ),
+            (buffer, buffer.idx),
         )
 
         render_segments_trace(ax, trace, color=c[i])
@@ -165,13 +161,13 @@ def tree_unflatten(tree_buffer: TreeBuffer, idx: int = 0) -> Node:
     if tree_buffer.is_leaf[idx]:
         return LeafNode(
             value=tree_buffer.values[idx],
-            interval=Interval(tree_buffer.node_lower[idx], tree_buffer.node_upper[idx]),
+            interval=Interval(tree_buffer.lower[idx], tree_buffer.upper[idx]),
         )
     else:
         return InternalNode(
-            left=tree_unflatten(tree_buffer, tree_buffer.left_idx[idx]),
-            right=tree_unflatten(tree_buffer, tree_buffer.right_idx[idx]),
-            interval=Interval(tree_buffer.node_lower[idx], tree_buffer.node_upper[idx]),
+            left=tree_unflatten(tree_buffer, tree_buffer.children[idx, 0]),
+            right=tree_unflatten(tree_buffer, tree_buffer.children[idx, 1]),
+            interval=Interval(tree_buffer.lower[idx], tree_buffer.upper[idx]),
         )
 
 
@@ -193,7 +189,7 @@ def render_node(ax: plt.Axes, node: Node, color: str) -> None:
 
 
 def render_segments_trace(ax: plt.Axes, trace: Trace, color: str) -> None:
-    buffer, _ = trace.retval
+    buffer, idx = trace.retval
     tree = tree_unflatten(buffer)
 
     render_node(ax, tree, color)
