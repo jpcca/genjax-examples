@@ -28,7 +28,7 @@ class Interval:
 @jax.tree_util.register_dataclass
 @dataclass
 class Node(ABC):
-    idx: int
+    idx: int = field(metadata=dict(static=True))
 
 
 @jax.tree_util.register_dataclass
@@ -55,7 +55,8 @@ class NodeBuffer:
     values: Float[Array, "MAX_NODES"]
 
     idx: Integer[Array, "MAX_NODES"] = field(  # in breadth-first search order
-        default_factory=lambda: jnp.arange(MAX_NODES, dtype=jnp.int32)
+        default_factory=lambda: jnp.arange(MAX_NODES, dtype=jnp.int32),
+        metadata=dict(static=True),
     )
 
     left_idx: Integer[Array, "MAX_NODES"] = field(
