@@ -6,6 +6,17 @@ import seaborn as sns
 from scipy.stats import chi2_contingency
 
 
+def preprocess_demographics(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert Japanese gender labels to English and drop the original column.
+    """
+    df = df.copy()
+    sex_mapping = {"男性": "male", "女性": "female"}
+    df["sex"] = df["macromill_sex"].map(sex_mapping)
+    df.drop(columns=["macromill_sex"], inplace=True)
+    return df
+
+
 def filter_frequent_referers(
     df: pd.DataFrame, tuuid_col: str = "tuuid", referer_col: str = "referer", min_count: int = 100
 ) -> Tuple[pd.DataFrame, List[str]]:
