@@ -4,9 +4,9 @@ from jax import random, vmap, nn, jit
 import genjax
 from genjax import ChoiceMapBuilder as C
 from genjax import gen, mv_normal
+from jaxtyping import PRNGKeyArray
 
 FloatArray = jax.Array
-PRNGKey = jax.random.PRNGKey
 Arguments = tuple
 Score = FloatArray
 Weight = FloatArray
@@ -50,7 +50,7 @@ def reconstruct_z(x_k: FloatArray, y_sample: FloatArray, target_idx: int) -> Flo
 # SIR weight calculation for upper bound (log p(x_k, y) / q0(x_k))
 # ----------------------------------------
 def log_sir_weight_upper(
-    key: PRNGKey,
+    key: PRNGKeyArray,
     y_sample: FloatArray,
     model_args: Arguments,
     q0_args: Arguments,
@@ -78,7 +78,7 @@ def log_sir_weight_upper(
 # SIR weight calculation for lower bound (log p(x'_k, y') / q0(x'_k))
 # ----------------------------------------
 def log_sir_weight_lower(
-    key: PRNGKey,
+    key: PRNGKeyArray,
     joint_choice: genjax.ChoiceMap,
     model_args: Arguments,
     q0_args: Arguments,
@@ -122,7 +122,7 @@ def log_sir_weight_lower(
 # Simplified EEVI entropy bound estimator for H(Z_i)
 # ----------------------------------------
 def estimate_single_marginal_entropy_bounds(
-    key: PRNGKey,
+    key: PRNGKeyArray,
     n_outer_samples: int,
     P_sir_particles: int,
     mu_full: FloatArray,
