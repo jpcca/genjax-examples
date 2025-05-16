@@ -1,9 +1,13 @@
+import functools
 import jax
 import jax.numpy as jnp
 from jax import random, vmap, nn, jit
 import genjax
 from genjax import ChoiceMapBuilder as C
 from genjax import gen, mv_normal
+
+# Import generic EEVI estimators
+from src.eevi.estimator import estimate_entropy_bounds_generic
 
 FloatArray = jax.Array
 PRNGKey = jax.random.PRNGKey
@@ -14,6 +18,7 @@ Weight = FloatArray
 
 # ----------------------------------------
 # Model definition: p(z) = MVN(z | mu_full, cov_full)
+# This is the P-MODEL for EEVI.
 # ----------------------------------------
 @gen
 def joint_model(mu_full: FloatArray, cov_full: FloatArray) -> FloatArray:
@@ -25,6 +30,7 @@ def joint_model(mu_full: FloatArray, cov_full: FloatArray) -> FloatArray:
 # ----------------------------------------
 # Base proposal distribution: q0(x) = p(z_{\setminus i})
 # (x represents z_{\setminus i})
+# This is the Q0-MODEL for EEVI.
 # ----------------------------------------
 @gen
 def base_proposal(mu_x: FloatArray, cov_xx: FloatArray) -> FloatArray:
@@ -33,168 +39,81 @@ def base_proposal(mu_x: FloatArray, cov_xx: FloatArray) -> FloatArray:
     return x
 
 
-q0 = base_proposal
+# q0 = base_proposal # q0_model will be base_proposal directly
 
 
-# ----------------------------------------
-# Helper: Reconstruct z from x=z_{\setminus i} and y=z_i
-# ----------------------------------------
+# --- Helper functions for generic EEVI estimator for MVN ---
+
+
+# reconstruct_z_values_fn: (x_k_from_q0, y_sample, target_idx) -> z_values_array
 @jit
-def reconstruct_z(x_k: FloatArray, y_sample: FloatArray, target_idx: int) -> FloatArray:
+def reconstruct_z_mvn(
+    x_k: FloatArray, y_sample: FloatArray, target_idx: int
+) -> FloatArray:
     """Inserts scalar y_sample into x_k at target_idx to form z_k."""
-    y_val = y_sample.reshape(())  # Ensure y_sample is scalar
+    y_val = y_sample.reshape(())  # Ensure y_sample is scalar for insertion
     return jnp.insert(x_k, target_idx, y_val)
 
 
-# ----------------------------------------
-# SIR weight calculation for upper bound (log p(x_k, y) / q0(x_k))
-# ----------------------------------------
-def log_sir_weight_upper(
-    key: PRNGKey,
-    y_sample: FloatArray,
-    model_args: Arguments,
-    q0_args: Arguments,
-    P_particles: int,
-    target_idx: int,
-) -> Weight:
-    keys_q0 = random.split(key, P_particles)
-
-    traces_q0 = vmap(q0.simulate, in_axes=(0, None))(keys_q0, q0_args)
-    x_samples = vmap(lambda tr: tr.get_retval())(traces_q0)
-    log_q0_vals = vmap(lambda tr: q0.assess(tr.get_choices(), q0_args)[0])(traces_q0)
-
-    def assess_p(x_k_single_sample: FloatArray) -> Score:
-        z_k = reconstruct_z(x_k_single_sample, y_sample, target_idx)
-        choices = C["z"].set(z_k)
-        log_p, _ = joint_model.assess(choices, model_args)
-        return log_p
-
-    log_p_vals = vmap(assess_p)(x_samples)
-    log_weights = log_p_vals - log_q0_vals
-    return nn.logsumexp(log_weights) - jnp.log(P_particles)
+# build_p_choices_fn: (z_values_array) -> ChoiceMap for p_model (joint_model)
+def build_p_choices_for_mvn(z_values_array: jnp.ndarray) -> genjax.ChoiceMap:
+    return C["z"].set(z_values_array)
 
 
-# ----------------------------------------
-# SIR weight calculation for lower bound (log p(x'_k, y') / q0(x'_k))
-# ----------------------------------------
-def log_sir_weight_lower(
-    key: PRNGKey,
-    joint_choice: genjax.ChoiceMap,
-    model_args: Arguments,
-    q0_args: Arguments,
-    P_particles: int,
-    target_idx: int,
-) -> Weight:
+# extract_y_prime_fn: (joint_choice_from_p, target_idx) -> y_prime_sample_array
+def extract_y_prime_for_mvn(
+    joint_choice: genjax.ChoiceMap, target_idx: int
+) -> jnp.ndarray:
     z_prime = joint_choice["z"]
-    y_prime = z_prime[target_idx : target_idx + 1]
-    x_prime = jnp.delete(z_prime, target_idx, axis=0)
-
-    log_q0_prime_1, _ = q0.assess(C["x"].set(x_prime), q0_args)
-    log_p_1, _ = joint_model.assess(joint_choice, model_args)
-    log_weight_1 = log_p_1 - log_q0_prime_1
-
-    if P_particles > 1:
-        keys_q0_prime_k = random.split(key, P_particles - 1)
-        traces_q0_prime_k = vmap(q0.simulate, in_axes=(0, None))(
-            keys_q0_prime_k, q0_args
-        )
-        x_prime_samples_k = vmap(lambda tr: tr.get_retval())(traces_q0_prime_k)
-        log_q0_prime_vals_k = vmap(lambda tr: q0.assess(tr.get_choices(), q0_args)[0])(
-            traces_q0_prime_k
-        )
-
-        def assess_p_prime_k(x_sample_k: FloatArray) -> Score:
-            z_k = reconstruct_z(x_sample_k, y_prime, target_idx)
-            choices = C["z"].set(z_k)
-            log_p, _ = joint_model.assess(choices, model_args)
-            return log_p
-
-        log_p_vals_k = vmap(assess_p_prime_k)(x_prime_samples_k)
-        log_weights_k = log_p_vals_k - log_q0_prime_vals_k
-        all_log_weights = jnp.concatenate([jnp.array([log_weight_1]), log_weights_k])
-    else:
-        all_log_weights = jnp.array([log_weight_1])
-
-    return nn.logsumexp(all_log_weights) - jnp.log(P_particles)
+    return z_prime[target_idx : target_idx + 1]  # Keep as array e.g. (1,)
 
 
-# ----------------------------------------
-# Simplified EEVI entropy bound estimator for H(Z_i)
-# ----------------------------------------
-def estimate_single_marginal_entropy_bounds(
-    key: PRNGKey,
-    n_outer_samples: int,
-    P_sir_particles: int,
-    mu_full: FloatArray,
-    cov_full: FloatArray,
-    target_idx_to_estimate: int,
-) -> tuple[FloatArray, FloatArray, FloatArray]:
-    """
-    Estimates analytical, lower, and upper bounds of a single marginal entropy H(Z_i).
-    """
-    key_y_sampling, key_joint_sampling, key_upper_sir, key_lower_sir = random.split(
-        key, 4
-    )
-
-    dim_z = mu_full.shape[0]
-    model_args = (mu_full, cov_full)
-
-    aux_indices = jnp.array([j for j in range(dim_z) if j != target_idx_to_estimate])
-    mu_x_q0 = mu_full[aux_indices]
-    cov_xx_q0 = cov_full[jnp.ix_(aux_indices, aux_indices)]
-    q0_args = (mu_x_q0, cov_xx_q0)
-
-    var_i = cov_full[target_idx_to_estimate, target_idx_to_estimate]
-    analytical_entropy_i = 0.5 * (1 + jnp.log(2 * jnp.pi * var_i))
-
-    # Upper bound H_hat(Z_i)
-    mu_y = mu_full[target_idx_to_estimate]
-    sigma_y = jnp.sqrt(var_i)
-    y_keys = random.split(key_y_sampling, n_outer_samples)
-    y_samples_for_upper = vmap(lambda k_y: random.normal(k_y) * sigma_y + mu_y)(
-        y_keys
-    ).reshape(-1, 1)
-
-    upper_sir_keys = random.split(key_upper_sir, n_outer_samples)
-    log_w_sir_upper_all = vmap(
-        log_sir_weight_upper, in_axes=(0, 0, None, None, None, None)
-    )(
-        upper_sir_keys,
-        y_samples_for_upper,
-        model_args,
-        q0_args,
-        P_sir_particles,
-        target_idx_to_estimate,
-    )
-    hat_H_Zi = -jnp.mean(log_w_sir_upper_all)
-
-    # Lower bound H_tilde(Z_i)
-    joint_sampling_keys = random.split(key_joint_sampling, n_outer_samples)
-    joint_traces = vmap(joint_model.simulate, in_axes=(0, None))(
-        joint_sampling_keys, model_args
-    )
-    joint_choices_for_lower = vmap(lambda tr: tr.get_choices())(joint_traces)
-
-    lower_sir_keys = random.split(key_lower_sir, n_outer_samples)
-    log_w_sir_lower_all = vmap(
-        log_sir_weight_lower, in_axes=(0, 0, None, None, None, None)
-    )(
-        lower_sir_keys,
-        joint_choices_for_lower,
-        model_args,
-        q0_args,
-        P_sir_particles,
-        target_idx_to_estimate,
-    )
-    tilde_H_Zi = -jnp.mean(log_w_sir_lower_all)
-
-    return analytical_entropy_i, tilde_H_Zi, hat_H_Zi
+# extract_x_prime_values_fn: (joint_choice_from_p, target_idx) -> x_prime_values_array
+def extract_x_prime_values_for_mvn(
+    joint_choice: genjax.ChoiceMap, target_idx: int
+) -> jnp.ndarray:
+    z_prime = joint_choice["z"]
+    return jnp.delete(z_prime, target_idx, axis=0)
 
 
-# JIT compile the main estimation function
-estimate_single_marginal_entropy_bounds_jit = jit(
-    estimate_single_marginal_entropy_bounds,
-    static_argnames=("n_outer_samples", "P_sir_particles", "target_idx_to_estimate"),
+# build_q0_choices_from_x_prime_fn: (x_prime_values_array) -> ChoiceMap for q0_model (base_proposal)
+def build_q0_choices_for_mvn(x_prime_values_array: jnp.ndarray) -> genjax.ChoiceMap:
+    return C["x"].set(x_prime_values_array)
+
+
+# sample_y_fn: (key, n_samples, mu_y, sigma_y) -> y_samples_array
+def sample_y_for_mvn_entropy(
+    key: PRNGKey, n_samples: int, mu_y: float, sigma_y: float
+) -> jnp.ndarray:
+    # Returns array of shape (n_samples,). reconstruct_z_mvn handles individual scalar y_sample.
+    return random.normal(key, shape=(n_samples,)) * sigma_y + mu_y
+
+
+# analytical_H_Y_fn: (variance_of_Zi) -> analytical_H_Zi
+def analytical_H_Zi_mvn(var_i: float) -> float:
+    return 0.5 * (1 + jnp.log(2 * jnp.pi * var_i))
+
+
+# JIT compile the generic estimation function for this specific MVN case
+# Helper functions are simple, JITting the main estimator should be effective.
+# The helper functions passed to estimate_entropy_bounds_generic are Python callables.
+# JAX's JIT will trace through them when estimate_entropy_bounds_generic_jit is first called.
+# We make n_outer_samples and P_sir_particles static for JIT.
+estimate_entropy_bounds_generic_jit = jit(
+    estimate_entropy_bounds_generic,
+    static_argnames=(
+        "n_outer_samples",
+        "P_sir_particles",
+        "p_model",
+        "q0_model",  # Models are static
+        "reconstruct_z_values_fn",
+        "build_p_choices_fn",
+        "extract_y_prime_fn",
+        "extract_x_prime_values_fn",
+        "build_q0_choices_from_x_prime_fn",
+        "sample_y_fn",
+        "analytical_H_Y_fn",  # All helper functions are static
+    ),
 )
 
 
@@ -208,29 +127,75 @@ def test_mvn_entropy():
     n_outer_samples = 10000  # Number of samples for E[...] (outer loop)
     P_sir_particles = 100  # Number of particles for SIR (inner loop)
 
-    # Define simple MVN parameters
+    # Define simple MVN parameters for p(z) = joint_model(z | mu_full, cov_full)
     mu_full = jnp.array([0.5, -0.5], dtype=jnp.float32)
-    cov_full = jnp.array(
-        [[1.0, 0.7], [0.7, 1.5]], dtype=jnp.float32  # Z0 variance = 1.0
-    )  # Z1 variance = 1.5
+    cov_full = jnp.array([[1.0, 0.7], [0.7, 1.5]], dtype=jnp.float32)
+    p_model_args = (mu_full, cov_full)
 
-    print("--- Simplified MVN Marginal Entropy Estimation Demo ---")
+    # Define parameters for q0(x) = base_proposal(x | mu_x, cov_xx)
+    # x = z_{\setminus target_idx_to_estimate}
+    aux_indices = jnp.array([j for j in range(dim_z) if j != target_idx_to_estimate])
+    mu_x_q0 = mu_full[aux_indices]
+    cov_xx_q0 = cov_full[jnp.ix_(aux_indices, aux_indices)]
+    q0_model_args = (mu_x_q0, cov_xx_q0)
+
+    # Prepare curried helper functions with target_idx
+    reconstruct_z_fn_curried = functools.partial(
+        reconstruct_z_mvn, target_idx=target_idx_to_estimate
+    )
+    extract_y_prime_fn_curried = functools.partial(
+        extract_y_prime_for_mvn, target_idx=target_idx_to_estimate
+    )
+    extract_x_prime_values_fn_curried = functools.partial(
+        extract_x_prime_values_for_mvn, target_idx=target_idx_to_estimate
+    )
+
+    # Arguments for sampling y ~ p(z_i)
+    mu_y_sampling = mu_full[target_idx_to_estimate]
+    var_y_sampling = cov_full[target_idx_to_estimate, target_idx_to_estimate]
+    sigma_y_sampling = jnp.sqrt(var_y_sampling)
+    y_sampling_args_mvn = (mu_y_sampling, sigma_y_sampling)
+
+    # Arguments for analytical H(Z_i)
+    analytical_H_Y_args_mvn = (var_y_sampling,)
+
+    print(
+        "--- Simplified MVN Marginal Entropy Estimation Demo (using generic EEVI) ---"
+    )
     print(f"Estimating H(Z_{target_idx_to_estimate}) for a {dim_z}-D MVN:")
     print(f"  mu_full = {mu_full}")
     print(f"  cov_full = \n{cov_full}")
     print(f"  n_outer_samples = {n_outer_samples}")
     print(f"  P_sir_particles = {P_sir_particles}\n")
 
-    # Run the estimation
-    analytical_H, lower_bound_H, upper_bound_H = (
-        estimate_single_marginal_entropy_bounds_jit(
-            key,
-            n_outer_samples,
-            P_sir_particles,
-            mu_full,
-            cov_full,
-            target_idx_to_estimate,
-        )
+    # Run the estimation using the JIT-compiled generic estimator
+    analytical_H, lower_bound_H, upper_bound_H = estimate_entropy_bounds_generic_jit(
+        key,
+        n_outer_samples,
+        P_sir_particles,
+        joint_model,
+        p_model_args,  # p_model and its args
+        base_proposal,
+        q0_model_args,  # q0_model and its args
+        reconstruct_z_fn_curried,  # reconstruct_z_values_fn
+        build_p_choices_for_mvn,  # build_p_choices_fn
+        extract_y_prime_fn_curried,  # extract_y_prime_fn
+        extract_x_prime_values_fn_curried,  # extract_x_prime_values_fn
+        build_q0_choices_for_mvn,  # build_q0_choices_from_x_prime_fn
+        sample_y_for_mvn_entropy,  # sample_y_fn
+        y_sampling_args_mvn,  # y_sampling_args
+        analytical_H_Y_fn=analytical_H_Zi_mvn,
+        analytical_H_Y_args=analytical_H_Y_args_mvn,
+    )
+
+    print(
+        f"  Analytical H(Z_{target_idx_to_estimate}) = {analytical_H:.4f} nats"
+    )  # Note: MVN entropy is in nats
+    print(
+        f"  EEVI Lower Bound H_tilde(Z_{target_idx_to_estimate}) = {lower_bound_H:.4f} nats"
+    )
+    print(
+        f"  EEVI Upper Bound H_hat(Z_{target_idx_to_estimate}) = {upper_bound_H:.4f} nats"
     )
 
     assert (
