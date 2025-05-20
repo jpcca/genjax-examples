@@ -26,18 +26,22 @@ def log_sir_weight_upper_generic(
 ) -> Weight:
     """
     Calculates the log Self-Importance Sampling (SIR) weight for the upper bound
-    of entropy H_hat(Y) = -E_{y~P(Y)}[log E_{x~q0(x)}[p(x,y)/q0(x)]].
+    of entropy H_hat(Y) = -E_{y~P(Y)}[log E_{x~q0(x|y)}[p(reconstruct_z(x,y))/q0(x|y)]].
     This function computes the inner expectation for a single y_sample.
-    log E_{x~q0(x)}[p(reconstruct_z(x,y))/q0(x)]
     """
     keys_q0 = random.split(key, P_particles)
 
-    # Simulate x_k ~ q0(x) and get their log probabilities log q0(x_k)
-    traces_q0 = vmap(q0_model.simulate, in_axes=(0, None))(keys_q0, q0_model_args)
+    # Construct full arguments for q0_model, prepending y_sample
+    # y_sample could be a single value or a tuple (e.g., for H(S,Wk))
+    full_q0_args_upper = (y_sample,) + q0_model_args
+
+    # Simulate x_k ~ q0(x | y_sample) and get their log probabilities log q0(x_k | y_sample)
+    # Assuming q0_model's first argument is the conditioning variable y_sample
+    traces_q0 = vmap(q0_model.simulate, in_axes=(0, None))(keys_q0, full_q0_args_upper)
     x_samples_from_q0 = vmap(lambda tr: tr.get_retval())(traces_q0)
-    log_q0_vals = vmap(lambda tr: q0_model.assess(tr.get_choices(), q0_model_args)[0])(
-        traces_q0
-    )
+    log_q0_vals = vmap(
+        lambda tr: q0_model.assess(tr.get_choices(), full_q0_args_upper)[0]
+    )(traces_q0)
 
     # For each x_k, reconstruct z_k from (x_k, y_sample) and assess log p(z_k)
     def assess_p_for_z_k(x_k_single_sample) -> Score:
@@ -48,7 +52,7 @@ def log_sir_weight_upper_generic(
 
     log_p_vals = vmap(assess_p_for_z_k)(x_samples_from_q0)
 
-    # Calculate log weights: log(p(z_k)/q0(x_k)) = log p(z_k) - log q0(x_k)
+    # Calculate log weights: log(p(z_k)/q0(x_k|y_sample)) = log p(z_k) - log q0(x_k|y_sample)
     log_weights = log_p_vals - log_q0_vals
 
     # Log-sum-exp for stable E[w_k] calculation: log( (1/P) * sum(weights_k) )
@@ -71,47 +75,52 @@ def log_sir_weight_lower_generic(
 ) -> Weight:
     """
     Calculates the log Self-Importance Sampling (SIR) weight for the lower bound
-    of entropy H_tilde(Y) = -E_{z'~P(Z)}[log E_{x~q0(x)}[p(x,y')/q0(x)]].
+    of entropy H_tilde(Y).
     This function computes the inner expectation for a single z' (joint_choice_from_p),
     where y' is extracted from z'.
-    log E_{x~q0(x U {x'})}[p(reconstruct_z(x,y'))/q0(x)]
-    The first particle is x', others are from q0.
+    The first particle is x' (from z'), others are from q0(x|y').
     """
     # Extract y' (marginal sample) and x'_values (proposal components) from z' ~ p(z)
     y_prime = extract_y_prime_fn(joint_choice_from_p)
     x_prime_values = extract_x_prime_values_fn(joint_choice_from_p)
 
-    # Build ChoiceMap for q0_model from x_prime_values to assess q0(x')
+    # Build ChoiceMap for q0_model from x_prime_values to assess q0(x' | y_prime)
     x_prime_q0_choices = build_q0_choices_from_x_prime_fn(x_prime_values)
 
-    # Calculate log q0(x')
-    log_q0_prime_1, _ = q0_model.assess(x_prime_q0_choices, q0_model_args)
+    # Construct full arguments for q0_model, prepending y_prime
+    full_q0_args_lower_prime = (y_prime,) + q0_model_args
+
+    # Calculate log q0(x' | y_prime)
+    log_q0_prime_1, _ = q0_model.assess(x_prime_q0_choices, full_q0_args_lower_prime)
     # Calculate log p(z') (z' is the original joint sample from p_model)
     log_p_1, _ = p_model.assess(joint_choice_from_p, p_model_args)
 
-    # First log weight term: log(p(z')/q0(x'))
+    # First log weight term: log(p(z')/q0(x'|y_prime))
     log_weight_1 = log_p_1 - log_q0_prime_1
 
     if P_particles > 1:
         keys_q0_prime_k = random.split(key, P_particles - 1)
-        # Simulate P-1 samples x_k ~ q0(x)
+        # Simulate P-1 samples x_k ~ q0(x | y_prime)
         traces_q0_k = vmap(q0_model.simulate, in_axes=(0, None))(
-            keys_q0_prime_k, q0_model_args
+            keys_q0_prime_k, full_q0_args_lower_prime  # Pass y_prime for conditioning
         )
         x_samples_k_from_q0 = vmap(lambda tr: tr.get_retval())(traces_q0_k)
         log_q0_vals_k = vmap(
-            lambda tr: q0_model.assess(tr.get_choices(), q0_model_args)[0]
+            lambda tr: q0_model.assess(tr.get_choices(), full_q0_args_lower_prime)[
+                0
+            ]  # Pass y_prime for conditioning
         )(traces_q0_k)
 
         # For each x_k, reconstruct z_k = (x_k, y') and assess p(z_k)
         def assess_p_for_zk_lower(x_k_single_sample) -> Score:
+            # y_prime is from the outer scope, specific to this call of log_sir_weight_lower_generic
             z_values_for_p = reconstruct_z_values_fn(x_k_single_sample, y_prime)
             p_choices = build_p_choices_fn(z_values_for_p)
             log_p_val, _ = p_model.assess(p_choices, p_model_args)
             return log_p_val
 
         log_p_vals_k = vmap(assess_p_for_zk_lower)(x_samples_k_from_q0)
-        # Log weights for these P-1 samples: log(p(z_k)/q0(x_k))
+        # Log weights for these P-1 samples: log(p(z_k)/q0(x_k|y_prime))
         log_weights_k = log_p_vals_k - log_q0_vals_k
 
         all_log_weights = jnp.concatenate([jnp.array([log_weight_1]), log_weights_k])
@@ -184,7 +193,7 @@ def estimate_entropy_bounds_generic(
         p_model,
         p_model_args,
         q0_model,
-        q0_model_args,
+        q0_model_args,  # These are the *remaining* args for q0, after y_sample
         reconstruct_z_values_fn,
         build_p_choices_fn,
         P_sir_particles,
@@ -208,7 +217,7 @@ def estimate_entropy_bounds_generic(
             None,  # p_model
             None,  # p_model_args
             None,  # q0_model
-            None,  # q0_model_args
+            None,  # q0_model_args # These are the *remaining* args for q0, after y_prime
             None,  # reconstruct_z_values_fn
             None,  # build_p_choices_fn
             None,  # extract_y_prime_fn
@@ -223,7 +232,7 @@ def estimate_entropy_bounds_generic(
         p_model,
         p_model_args,
         q0_model,
-        q0_model_args,
+        q0_model_args,  # These are the *remaining* args for q0, after y_prime
         reconstruct_z_values_fn,
         build_p_choices_fn,
         extract_y_prime_fn,
@@ -233,7 +242,7 @@ def estimate_entropy_bounds_generic(
     )
     tilde_H_Y = -jnp.mean(log_w_sir_lower_all)
 
-    analytical_H_Y_val = jnp.array(-1.0, dtype=jnp.float32)  # Ensure float type
+    analytical_H_Y_val = jnp.array(-1.0, dtype=jnp.float32)
     if analytical_H_Y_fn is not None:
         analytical_H_Y_val = analytical_H_Y_fn(*analytical_H_Y_args)
 
