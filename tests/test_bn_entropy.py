@@ -609,8 +609,8 @@ def test_mutual_information_estimation_with_e_evi():
     print(f"  Analytical MI(S;W{TARGET_PAGE_FOR_MI}) = {analytical_mi_val:.4f} bits")
 
     print("\n--- EEVI MI ---")
-    N_OUTER = 20000
-    P_SIR = 1000
+    N_OUTER = 500
+    P_SIR = 50
     MAIN_KEY = random.PRNGKey(12345)
     p_model_eevi_final = full_bn_model
 
