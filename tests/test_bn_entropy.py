@@ -772,10 +772,10 @@ def test_mutual_information_estimation_with_e_evi():
         f"  EEVI H(S,W{TARGET_PAGE_FOR_MI}): Analytical={an_hswk_val:.4f}, Lower={tilde_H_SWk:.4f}, Upper={hat_H_SWk:.4f}"
     )
 
-    tilde_MI_eeri = tilde_H_S + tilde_H_Wk - hat_H_SWk
-    hat_MI_eeri = hat_H_S + hat_H_Wk - tilde_H_SWk
+    tilde_MI_eevi = tilde_H_S + tilde_H_Wk - hat_H_SWk
+    hat_MI_eevi = hat_H_S + hat_H_Wk - tilde_H_SWk
     print(
-        f"\n  EEVI MI(S;W{TARGET_PAGE_FOR_MI}) Interval: [{tilde_MI_eeri:.4f}, {hat_MI_eeri:.4f}] bits"
+        f"\n  EEVI MI(S;W{TARGET_PAGE_FOR_MI}) Interval: [{tilde_MI_eevi:.4f}, {hat_MI_eevi:.4f}] bits"
     )
     print(
         f"  Analytical MI(S;W{TARGET_PAGE_FOR_MI})      : {analytical_mi_val:.4f} bits"
@@ -783,8 +783,8 @@ def test_mutual_information_estimation_with_e_evi():
 
     tolerance = 0.20
     assert (
-        tilde_MI_eeri - tolerance
-    ) <= analytical_mi_val, f"Analytical MI {analytical_mi_val} is less than lower EEVI bound {tilde_MI_eeri} (with tolerance {tolerance})"
+        tilde_MI_eevi - tolerance
+    ) <= analytical_mi_val, f"Analytical MI {analytical_mi_val} is less than lower EEVI bound {tilde_MI_eevi} (with tolerance {tolerance})"
     assert analytical_mi_val <= (
-        hat_MI_eeri + tolerance
-    ), f"Analytical MI {analytical_mi_val} is greater than upper EEVI bound {hat_MI_eeri} (with tolerance {tolerance})"
+        hat_MI_eevi + tolerance
+    ), f"Analytical MI {analytical_mi_val} is greater than upper EEVI bound {hat_MI_eevi} (with tolerance {tolerance})"
