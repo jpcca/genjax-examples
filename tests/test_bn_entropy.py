@@ -8,14 +8,13 @@ import functools
 from functools import partial
 
 # Import generic EEVI estimators
-# Предположим, что estimator.py находится в src/eevi/estimator.py
-# и ваш PYTHONPATH настроен соответствующим образом, или estimator.py находится в том же каталоге
-# или в src/eevi и __init__.py существует в src и src/eevi
-from src.eevi.estimator import estimate_entropy_bounds_generic
-
+from src.eevi.estimator import (
+    estimate_entropy_bounds_generic,
+)  # ユーザーの環境に合わせてパスを調整してください
 
 import pytest
-import numpy as np
+
+# import numpy as np # NumPyは直接は使わないが、型ヒントや互換性のために残す
 
 CSV_FILE_PATH = "tests/data/1-example/preprocessed.csv"
 WEB_PAGE_START_COLUMN_INDEX = 3
@@ -49,7 +48,7 @@ def sampling_age_model(age_category_probs: jnp.ndarray):
 def bn_web_pages_model(sex_idx: int, age_idx: int, web_pages_cpt: jnp.ndarray):
     prob_watch_vector = jnp.clip(web_pages_cpt[:, sex_idx, age_idx], 1e-7, 1.0 - 1e-7)
     watched_states = []
-    for i_loop_var in range(web_pages_cpt.shape[0]):
+    for i_loop_var in range(web_pages_cpt.shape[0]):  # num_web_pages_global と同じはず
         page_watched = (
             bernoulli(probs=prob_watch_vector[i_loop_var]) @ f"web_page_{i_loop_var}"
         )
@@ -104,12 +103,12 @@ def preprocess_data_and_calculate_params(df_input: pd.DataFrame):
                 value = cpt_series.get((s_idx, a_idx), 0.0)
                 web_pages_cpt = web_pages_cpt.at[page_idx, s_idx, a_idx].set(value)
 
-    sex_counts = local_df["sex_idx"].value_counts().sort_index()
+    sex_counts = local_df["sex_idx"].value_counts(dropna=False).sort_index()
     p_sex_vector = jnp.array(
         [sex_counts.get(i, 0) / len(local_df) for i in range(num_sex_categories)]
     )
 
-    age_counts = local_df["age_idx"].value_counts().sort_index()
+    age_counts = local_df["age_idx"].value_counts(dropna=False).sort_index()
     p_age_vector = jnp.array(
         [age_counts.get(i, 0) / len(local_df) for i in range(num_age_categories)]
     )
@@ -144,7 +143,7 @@ def get_analytical_probabilities(
             )
     p_wk_dist = jnp.array([1.0 - p_wk_one, p_wk_one])
 
-    p_s_wk_joint = jnp.zeros((num_sex_categories, 2))
+    p_s_wk_joint = jnp.zeros((num_sex_categories, 2))  # Assuming Wk is binary
     for s_idx in range(num_sex_categories):
         p_s_wk_one_given_s = 0.0
         for a_idx in range(num_age_categories):
@@ -162,7 +161,7 @@ def get_analytical_probabilities(
 
 @jit
 def calculate_entropy_discrete(prob_dist: jnp.ndarray) -> FloatArray:
-    prob_dist_clipped = jnp.clip(prob_dist, 1e-9, 1.0)
+    prob_dist_clipped = jnp.clip(prob_dist, 1e-9, 1.0)  # Avoid log(0)
     return -jnp.sum(prob_dist_clipped * jnp.log2(prob_dist_clipped))
 
 
@@ -190,38 +189,38 @@ def calculate_analytical_mi(
 
 
 # --- EEVI ---
-# Full BN model p(Sex, Age, WebPage_0, ..., WebPage_N-1)
 @gen
 def full_bn_model(
     p_sex_vector: jnp.ndarray, p_age_vector: jnp.ndarray, web_pages_cpt: jnp.ndarray
 ):
-    sex_idx = categorical(probs=p_sex_vector) @ "sex"
-    age_idx = categorical(probs=p_age_vector) @ "age"
-    watched_states_list = []
+    sex_idx = categorical(logits=jnp.log(jnp.clip(p_sex_vector, 1e-9))) @ "sex"
+    age_idx = categorical(logits=jnp.log(jnp.clip(p_age_vector, 1e-9))) @ "age"
+
     prob_watch_vector = jnp.clip(web_pages_cpt[:, sex_idx, age_idx], 1e-7, 1.0 - 1e-7)
-    for i in range(web_pages_cpt.shape[0]):
+
+    watched_states_list = []
+    for i in range(num_web_pages_global):
         page_watched = bernoulli(probs=prob_watch_vector[i]) @ f"web_page_{i}"
         watched_states_list.append(page_watched)
     return sex_idx, age_idx, jnp.stack(watched_states_list)
 
 
-# Base proposal for H(S): q0(Age, WebPages | Sex=s_fixed)
 def make_base_proposal_H_S(static_num_web_pages: int):
     @gen
     def base_proposal_H_S_specialized(
-        sex_idx: int,  # Conditioning variable Y for q0(X|Y)
-        p_age_vector: jnp.ndarray,
+        sex_idx: int,
+        p_age_marginal: jnp.ndarray,
         web_pages_cpt: jnp.ndarray,
     ):
-        age_idx = categorical(probs=p_age_vector) @ "age_q0_S"
-        watched_states_list = []
+        age_idx = (
+            categorical(logits=jnp.log(jnp.clip(p_age_marginal, 1e-9))) @ "age_q0_S"
+        )
         prob_watch_vector = jnp.clip(
-            web_pages_cpt[
-                :static_num_web_pages, sex_idx, age_idx
-            ],  # Use passed sex_idx
+            web_pages_cpt[:static_num_web_pages, sex_idx, age_idx],
             1e-7,
             1.0 - 1e-7,
         )
+        watched_states_list = []
         for i in range(static_num_web_pages):
             page_watched = bernoulli(probs=prob_watch_vector[i]) @ f"web_page_q0_S_{i}"
             watched_states_list.append(page_watched)
@@ -230,28 +229,55 @@ def make_base_proposal_H_S(static_num_web_pages: int):
     return base_proposal_H_S_specialized
 
 
-# Base proposal for H(Wk): q0(Sex, Age, WebPages_{\Wk} | Wk=wk_fixed)
-def make_base_proposal_H_Wk(static_target_page_idx: int, static_num_web_pages: int):
+def make_base_proposal_H_Wk(
+    static_target_page_idx: int,
+    static_num_web_pages: int,
+    num_sex_categories: int,
+    num_age_categories: int,
+):
     @gen
     def base_proposal_H_Wk_specialized(
-        wk_idx: int,  # Conditioning variable Y for q0(X|Y)
-        p_sex_vector: jnp.ndarray,
-        p_age_vector: jnp.ndarray,
+        wk_idx: int,
+        p_sex_marginal: jnp.ndarray,
+        p_age_marginal: jnp.ndarray,
         web_pages_cpt: jnp.ndarray,
     ):
-        sex_idx = categorical(probs=p_sex_vector) @ "sex_q0_Wk"
-        age_idx = categorical(probs=p_age_vector) @ "age_q0_Wk"
+        log_probs_sex_given_wk = jnp.zeros(num_sex_categories)
+        for s_loop_idx in range(num_sex_categories):
+            prob_wk_given_s = 0.0
+            for a_loop_idx in range(num_age_categories):
+                prob_wk_given_s_a_raw = web_pages_cpt[
+                    static_target_page_idx, s_loop_idx, a_loop_idx
+                ]
+                # JAX-friendly conditional assignment
+                prob_wk_given_s_a = jnp.where(
+                    jnp.equal(wk_idx, 0),
+                    1.0 - prob_wk_given_s_a_raw,
+                    prob_wk_given_s_a_raw,
+                )
+                prob_wk_given_s += prob_wk_given_s_a * p_age_marginal[a_loop_idx]
+            log_probs_sex_given_wk = log_probs_sex_given_wk.at[s_loop_idx].set(
+                jnp.log(jnp.clip(prob_wk_given_s * p_sex_marginal[s_loop_idx], 1e-9))
+            )
+        sex_idx = categorical(logits=log_probs_sex_given_wk) @ "sex_q0_Wk"
+
+        log_probs_age_given_s_wk = jnp.zeros(num_age_categories)
+        for a_loop_idx in range(num_age_categories):
+            prob_wk_given_s_a_raw = web_pages_cpt[
+                static_target_page_idx, sex_idx, a_loop_idx
+            ]
+            prob_wk_given_s_a = jnp.where(
+                jnp.equal(wk_idx, 0), 1.0 - prob_wk_given_s_a_raw, prob_wk_given_s_a_raw
+            )
+            log_probs_age_given_s_wk = log_probs_age_given_s_wk.at[a_loop_idx].set(
+                jnp.log(jnp.clip(prob_wk_given_s_a * p_age_marginal[a_loop_idx], 1e-9))
+            )
+        age_idx = categorical(logits=log_probs_age_given_s_wk) @ "age_q0_Wk"
+
         other_webpages_states_list = []
         prob_watch_vector_all = jnp.clip(
             web_pages_cpt[:static_num_web_pages, sex_idx, age_idx], 1e-7, 1.0 - 1e-7
         )
-        # Wk is fixed by conditioning on wk_idx.
-        # q0 samples other variables (Sex, Age, Webpages_{\Wk})
-        # The probability of observing wk_idx for web_page_{target_page_idx}
-        # under the sampled sex_idx, age_idx should ideally be high.
-        # This proposal q0(Sex, Age, WebPages_{\Wk} | Wk=wk_fixed) is a bit tricky.
-        # A simpler q0 might be q0(Sex, Age | Wk=wk_fixed) * P(WebPages_{\Wk} | Sex, Age, Wk=wk_fixed)
-        # For now, we sample Sex and Age independently, then WebPages_{\Wk}
         for i in range(static_num_web_pages):
             if i == static_target_page_idx:
                 continue
@@ -259,38 +285,49 @@ def make_base_proposal_H_Wk(static_target_page_idx: int, static_num_web_pages: i
                 bernoulli(probs=prob_watch_vector_all[i]) @ f"web_page_q0_Wk_{i}"
             )
             other_webpages_states_list.append(page_watched)
+
         return (
             sex_idx,
             age_idx,
             (
                 jnp.stack(other_webpages_states_list)
                 if other_webpages_states_list
-                else jnp.array([])
-            ),
+                else jnp.array([], dtype=jnp.int32)
+            ),  # Ensure dtype for empty
         )
 
     return base_proposal_H_Wk_specialized
 
 
-# Base proposal for H(S,Wk): q0(Age, WebPages_{\Wk} | Sex=s_fixed, Wk=wk_fixed)
-def make_base_proposal_H_SWk(static_target_page_idx: int, static_num_web_pages: int):
+def make_base_proposal_H_SWk(
+    static_target_page_idx: int, static_num_web_pages: int, num_age_categories: int
+):
     @gen
     def base_proposal_H_SWk_specialized(
-        s_wk_tuple: tuple[int, int],  # Conditioning variable Y = (Sex, Wk)
-        p_age_vector: jnp.ndarray,
+        s_wk_tuple: tuple[FloatArray, FloatArray],
+        p_age_marginal: jnp.ndarray,
         web_pages_cpt: jnp.ndarray,
     ):
-        sex_idx, wk_idx = s_wk_tuple  # Unpack conditioning variables
-        age_idx = categorical(probs=p_age_vector) @ "age_q0_SWk"
+        sex_idx = s_wk_tuple[0].astype(jnp.int32)
+        wk_idx = s_wk_tuple[1].astype(jnp.int32)
+
+        log_probs_age_given_s_wk = jnp.zeros(num_age_categories)
+        for a_loop_idx in range(num_age_categories):
+            prob_wk_given_s_a_raw = web_pages_cpt[
+                static_target_page_idx, sex_idx, a_loop_idx
+            ]
+            prob_wk_given_s_a = jnp.where(
+                jnp.equal(wk_idx, 0), 1.0 - prob_wk_given_s_a_raw, prob_wk_given_s_a_raw
+            )
+            log_probs_age_given_s_wk = log_probs_age_given_s_wk.at[a_loop_idx].set(
+                jnp.log(jnp.clip(prob_wk_given_s_a * p_age_marginal[a_loop_idx], 1e-9))
+            )
+        age_idx = categorical(logits=log_probs_age_given_s_wk) @ "age_q0_SWk"
+
         other_webpages_states_list = []
         prob_watch_vector_all = jnp.clip(
-            web_pages_cpt[
-                :static_num_web_pages, sex_idx, age_idx
-            ],  # Use passed sex_idx
-            1e-7,
-            1.0 - 1e-7,
+            web_pages_cpt[:static_num_web_pages, sex_idx, age_idx], 1e-7, 1.0 - 1e-7
         )
-        # wk_idx is also part of the conditioning.
         for i in range(static_num_web_pages):
             if i == static_target_page_idx:
                 continue
@@ -298,22 +335,21 @@ def make_base_proposal_H_SWk(static_target_page_idx: int, static_num_web_pages: 
                 bernoulli(probs=prob_watch_vector_all[i]) @ f"web_page_q0_SWk_{i}"
             )
             other_webpages_states_list.append(page_watched)
+
         return age_idx, (
             jnp.stack(other_webpages_states_list)
             if other_webpages_states_list
-            else jnp.array([])
+            else jnp.array([], dtype=jnp.int32)  # Ensure dtype for empty
         )
 
     return base_proposal_H_SWk_specialized
 
 
-# --- Helper functions for generic EEVI estimator ---
-
-
+# --- Helper functions for generic EEVI estimator --- (No changes below this line from last version)
 @jit
 def reconstruct_z_H_S_values(
-    x_sample: tuple[FloatArray, FloatArray],  # x_sample is (age_idx_q0, webpages_q0)
-    y_sample_sex: FloatArray,  # This is sex_idx from p(S)
+    x_sample: tuple[FloatArray, FloatArray],
+    y_sample_sex: FloatArray,
 ) -> tuple:
     age_idx_q0, webpages_q0 = x_sample
     return (y_sample_sex.astype(jnp.int32), age_idx_q0.astype(jnp.int32), webpages_q0)
@@ -321,10 +357,8 @@ def reconstruct_z_H_S_values(
 
 @partial(jit, static_argnums=(2,))
 def reconstruct_z_H_Wk_values(
-    x_sample: tuple[
-        FloatArray, FloatArray, FloatArray
-    ],  # (sex_idx_q0, age_idx_q0, other_pages_q0)
-    y_sample_wk: FloatArray,  # This is wk_idx from p(Wk)
+    x_sample: tuple[FloatArray, FloatArray, FloatArray],
+    y_sample_wk: FloatArray,
     target_page_idx: int,
 ) -> tuple:
     sex_idx_q0, age_idx_q0, other_pages_q0 = x_sample
@@ -344,24 +378,26 @@ def reconstruct_z_H_Wk_values(
 
 @partial(jit, static_argnums=(2,))
 def reconstruct_z_H_SWk_values(
-    x_sample: tuple[FloatArray, FloatArray],  # (age_idx_q0, other_pages_q0)
-    y_sample_s_wk: tuple[FloatArray, FloatArray],  # (sex_val_y, wk_val_y) from p(S,Wk)
+    x_sample: tuple[FloatArray, FloatArray],
+    y_sample_s_wk: tuple[FloatArray, FloatArray],
     target_page_idx: int,
 ) -> tuple:
     age_idx_q0, other_pages_q0 = x_sample
-    sex_val_y, wk_val_y = y_sample_s_wk
+    sex_val_y, wk_val_y = y_sample_s_wk[0].astype(jnp.int32), y_sample_s_wk[1].astype(
+        jnp.int32
+    )
     all_webpages = jnp.zeros(num_web_pages_global, dtype=jnp.int32)
     current_other_idx = 0
     for i in range(num_web_pages_global):
         if i == target_page_idx:
-            all_webpages = all_webpages.at[i].set(wk_val_y.astype(jnp.int32))
+            all_webpages = all_webpages.at[i].set(wk_val_y)
         else:
             if other_pages_q0.size > 0 and current_other_idx < other_pages_q0.shape[0]:
                 all_webpages = all_webpages.at[i].set(
                     other_pages_q0[current_other_idx].astype(jnp.int32)
                 )
                 current_other_idx += 1
-    return (sex_val_y.astype(jnp.int32), age_idx_q0.astype(jnp.int32), all_webpages)
+    return (sex_val_y, age_idx_q0.astype(jnp.int32), all_webpages)
 
 
 def build_p_choices_for_bn(
@@ -371,11 +407,11 @@ def build_p_choices_for_bn(
     choices = C.n()
     choices = choices | C["sex"].set(sex_val.astype(jnp.int32))
     choices = choices | C["age"].set(age_val.astype(jnp.int32))
-    for i_wp in range(num_web_pages_for_p_assess):
-        if i_wp < webpages_val.shape[0]:  # Check needed if webpages_val can be shorter
-            choices = choices | C[f"web_page_{i_wp}"].set(
-                webpages_val[i_wp].astype(jnp.int32)
-            )
+    max_pages_to_set = min(webpages_val.shape[0], num_web_pages_for_p_assess)
+    for i_wp in range(max_pages_to_set):
+        choices = choices | C[f"web_page_{i_wp}"].set(
+            webpages_val[i_wp].astype(jnp.int32)
+        )
     return choices
 
 
@@ -468,10 +504,7 @@ def sample_y_for_bn_entropy(
         )
         s_indices = sampled_indices_flat // num_wk_categories
         wk_states = sampled_indices_flat % num_wk_categories
-        return (
-            s_indices,
-            wk_states,
-        )  # Returns a tuple of arrays for vmap compatibility in estimator
+        return (s_indices.astype(jnp.float32), wk_states.astype(jnp.float32))
     raise ValueError(f"Unknown y_var_type: {y_var_type}")
 
 
@@ -481,10 +514,13 @@ def curried_extract_y_prime_H_S(joint_choice: genjax.ChoiceMap):
 
 def curried_extract_x_prime_H_S(joint_choice: genjax.ChoiceMap, num_web_pages: int):
     age_val = joint_choice["age"]
-    webpages_val = jnp.array(
-        [joint_choice[f"web_page_{i}"] for i in range(num_web_pages)]
-    )
-    return (age_val, webpages_val)
+    webpages_val_list = []
+    for i in range(num_web_pages):
+        if f"web_page_{i}" in joint_choice:  # Check if key exists
+            webpages_val_list.append(joint_choice[f"web_page_{i}"])
+        else:
+            webpages_val_list.append(0)  # Default if not found
+    return (age_val, jnp.array(webpages_val_list, dtype=jnp.int32))
 
 
 def curried_extract_y_prime_H_Wk(joint_choice: genjax.ChoiceMap, target_page_idx: int):
@@ -496,32 +532,51 @@ def curried_extract_x_prime_H_Wk(
 ):
     sex_val = joint_choice["sex"]
     age_val = joint_choice["age"]
-    other_pages_list = [
-        joint_choice[f"web_page_{i}"]
-        for i in range(num_web_pages)
-        if i != target_page_idx
-    ]
+    other_pages_list = []
+    for i in range(num_web_pages):
+        if i == target_page_idx:
+            continue
+        if f"web_page_{i}" in joint_choice:
+            other_pages_list.append(joint_choice[f"web_page_{i}"])
+        else:
+            other_pages_list.append(0)
     return (
         sex_val,
         age_val,
-        jnp.stack(other_pages_list) if other_pages_list else jnp.array([]),
+        (
+            jnp.array(other_pages_list, dtype=jnp.int32)
+            if other_pages_list
+            else jnp.array([], dtype=jnp.int32)
+        ),
     )
 
 
 def curried_extract_y_prime_H_SWk(joint_choice: genjax.ChoiceMap, target_page_idx: int):
-    return (joint_choice["sex"], joint_choice[f"web_page_{target_page_idx}"])
+    sex_val = joint_choice["sex"]
+    wk_val = joint_choice[f"web_page_{target_page_idx}"]
+    return (sex_val.astype(jnp.float32), wk_val.astype(jnp.float32))
 
 
 def curried_extract_x_prime_H_SWk(
     joint_choice: genjax.ChoiceMap, target_page_idx: int, num_web_pages: int
 ):
     age_val = joint_choice["age"]
-    other_pages_list = [
-        joint_choice[f"web_page_{i}"]
-        for i in range(num_web_pages)
-        if i != target_page_idx
-    ]
-    return (age_val, jnp.stack(other_pages_list) if other_pages_list else jnp.array([]))
+    other_pages_list = []
+    for i in range(num_web_pages):
+        if i == target_page_idx:
+            continue
+        if f"web_page_{i}" in joint_choice:
+            other_pages_list.append(joint_choice[f"web_page_{i}"])
+        else:
+            other_pages_list.append(0)
+    return (
+        age_val,
+        (
+            jnp.array(other_pages_list, dtype=jnp.int32)
+            if other_pages_list
+            else jnp.array([], dtype=jnp.int32)
+        ),
+    )
 
 
 def test_mutual_information_estimation_with_e_evi():
@@ -538,6 +593,7 @@ def test_mutual_information_estimation_with_e_evi():
     p_sex_gl = jnp.clip(p_sex_gl, 1e-9, 1.0)
     p_age_gl = jnp.clip(p_age_gl, 1e-9, 1.0)
     web_cpt_gl = jnp.clip(web_cpt_gl, 1e-7, 1.0 - 1e-7)
+
     print(f"P(Sex) from data = {p_sex_gl}")
     print(f"P(Age) from data = {p_age_gl}")
 
@@ -553,9 +609,9 @@ def test_mutual_information_estimation_with_e_evi():
     print(f"  Analytical MI(S;W{TARGET_PAGE_FOR_MI}) = {analytical_mi_val:.4f} bits")
 
     print("\n--- EEVI MI ---")
-    N_OUTER = 1000  # Original: 1000, Test with 10000
-    P_SIR = 100  # Original: 100, Test with 1000
-    MAIN_KEY = random.PRNGKey(123)
+    N_OUTER = 20000
+    P_SIR = 1000
+    MAIN_KEY = random.PRNGKey(12345)
     p_model_eevi_final = full_bn_model
 
     p_model_args_eevi = (p_sex_gl, p_age_gl, web_cpt_gl)
@@ -567,26 +623,15 @@ def test_mutual_information_estimation_with_e_evi():
     key_hs, MAIN_KEY = random.split(MAIN_KEY)
     print(f"Estimating H(S) with EEVI (N_outer={N_OUTER}, P_sir={P_SIR})...")
     q0_model_H_S_spec = make_base_proposal_H_S(num_web_pages_global)
-    q0_args_H_S = (p_age_gl, web_cpt_gl)  # Args for q0_H_S, after sex_idx
-
+    q0_args_H_S = (p_age_gl, web_cpt_gl)
     reconstruct_z_fn_H_S = reconstruct_z_H_S_values
-    extract_y_prime_fn_H_S = curried_extract_y_prime_H_S  # y' is sex
+    extract_y_prime_fn_H_S = curried_extract_y_prime_H_S
     extract_x_prime_values_fn_H_S = functools.partial(
         curried_extract_x_prime_H_S, num_web_pages=num_web_pages_global
     )
     build_q0_choices_fn_H_S = build_q0_H_S_choices
-
-    y_sampling_args_H_S = (
-        "S",
-        p_sex_gl,
-        p_age_gl,
-        web_cpt_gl,
-        -1,
-        n_sex_gl,
-        n_age_gl,
-    )
+    y_sampling_args_H_S = ("S", p_sex_gl, p_age_gl, web_cpt_gl, -1, n_sex_gl, n_age_gl)
     analytical_H_Y_args_H_S = (p_sex_gl,)
-
     an_hs_val, tilde_H_S, hat_H_S = estimate_entropy_bounds_generic(
         key_hs,
         N_OUTER,
@@ -615,10 +660,9 @@ def test_mutual_information_estimation_with_e_evi():
         f"Estimating H(W{TARGET_PAGE_FOR_MI}) with EEVI (N_outer={N_OUTER}, P_sir={P_SIR})..."
     )
     q0_model_H_Wk_spec = make_base_proposal_H_Wk(
-        TARGET_PAGE_FOR_MI, num_web_pages_global
+        TARGET_PAGE_FOR_MI, num_web_pages_global, n_sex_gl, n_age_gl
     )
-    q0_args_H_Wk = (p_sex_gl, p_age_gl, web_cpt_gl)  # Args for q0_H_Wk, after wk_idx
-
+    q0_args_H_Wk = (p_sex_gl, p_age_gl, web_cpt_gl)
     reconstruct_z_fn_H_Wk = functools.partial(
         reconstruct_z_H_Wk_values, target_page_idx=TARGET_PAGE_FOR_MI
     )
@@ -635,7 +679,6 @@ def test_mutual_information_estimation_with_e_evi():
         target_page_idx=TARGET_PAGE_FOR_MI,
         num_web_pages=num_web_pages_global,
     )
-
     y_sampling_args_H_Wk = (
         "Wk",
         p_sex_gl,
@@ -649,7 +692,6 @@ def test_mutual_information_estimation_with_e_evi():
         p_sex_gl, p_age_gl, web_cpt_gl, TARGET_PAGE_FOR_MI, n_sex_gl, n_age_gl
     )
     analytical_H_Y_args_H_Wk = (p_wk_dist_an,)
-
     an_hwk_val, tilde_H_Wk, hat_H_Wk = estimate_entropy_bounds_generic(
         key_hwk,
         N_OUTER,
@@ -678,13 +720,9 @@ def test_mutual_information_estimation_with_e_evi():
         f"Estimating H(S,W{TARGET_PAGE_FOR_MI}) with EEVI (N_outer={N_OUTER}, P_sir={P_SIR})..."
     )
     q0_model_H_SWk_spec = make_base_proposal_H_SWk(
-        TARGET_PAGE_FOR_MI, num_web_pages_global
+        TARGET_PAGE_FOR_MI, num_web_pages_global, n_age_gl
     )
-    q0_args_H_SWk = (
-        p_age_gl,
-        web_cpt_gl,
-    )  # Args for q0_H_SWk, after (sex_idx, wk_idx) tuple
-
+    q0_args_H_SWk = (p_age_gl, web_cpt_gl)
     reconstruct_z_fn_H_SWk = functools.partial(
         reconstruct_z_H_SWk_values, target_page_idx=TARGET_PAGE_FOR_MI
     )
@@ -701,7 +739,6 @@ def test_mutual_information_estimation_with_e_evi():
         target_page_idx=TARGET_PAGE_FOR_MI,
         num_web_pages=num_web_pages_global,
     )
-
     y_sampling_args_H_SWk = (
         "SWk",
         p_sex_gl,
@@ -715,7 +752,6 @@ def test_mutual_information_estimation_with_e_evi():
         p_sex_gl, p_age_gl, web_cpt_gl, TARGET_PAGE_FOR_MI, n_sex_gl, n_age_gl
     )
     analytical_H_Y_args_H_SWk = (p_s_wk_joint_an.flatten(),)
-
     an_hswk_val, tilde_H_SWk, hat_H_SWk = estimate_entropy_bounds_generic(
         key_hswk,
         N_OUTER,
@@ -738,7 +774,6 @@ def test_mutual_information_estimation_with_e_evi():
         f"  EEVI H(S,W{TARGET_PAGE_FOR_MI}): Analytical={an_hswk_val:.4f}, Lower={tilde_H_SWk:.4f}, Upper={hat_H_SWk:.4f}"
     )
 
-    # Renamed eeri to eevi for clarity
     tilde_MI_eevi = tilde_H_S + tilde_H_Wk - hat_H_SWk
     hat_MI_eevi = hat_H_S + hat_H_Wk - tilde_H_SWk
     print(
@@ -748,12 +783,10 @@ def test_mutual_information_estimation_with_e_evi():
         f"  Analytical MI(S;W{TARGET_PAGE_FOR_MI})      : {analytical_mi_val:.4f} bits"
     )
 
-    tolerance = 0.25  # Increased tolerance slightly for initial testing with new logic
-    assert (tilde_MI_eevi - tolerance) <= analytical_mi_val, (
-        f"Analytical MI {analytical_mi_val:.4f} is less than lower EEVI bound {tilde_MI_eevi:.4f} "
-        f"(Lower bound should be <= MI_analytical. Diff: {analytical_mi_val - tilde_MI_eevi:.4f})"
-    )
-    assert analytical_mi_val <= (hat_MI_eevi + tolerance), (
-        f"Analytical MI {analytical_mi_val:.4f} is greater than upper EEVI bound {hat_MI_eevi:.4f} "
-        f"(Upper bound should be >= MI_analytical. Diff: {hat_MI_eevi - analytical_mi_val:.4f})"
+    tolerance = 0.05
+    assert (
+        (tilde_MI_eevi - tolerance) <= analytical_mi_val <= (hat_MI_eevi + tolerance)
+    ), (
+        f"Analytical MI {analytical_mi_val:.4f} not in EEVI interval [{tilde_MI_eevi:.4f}, {hat_MI_eevi:.4f}] with tolerance {tolerance}. "
+        f"Lower diff: {analytical_mi_val - tilde_MI_eevi:.4f}, Upper diff: {hat_MI_eevi - analytical_mi_val:.4f}"
     )
