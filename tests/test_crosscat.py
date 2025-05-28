@@ -98,8 +98,7 @@ def create_sbp_model(num_max_components: int):
         alpha_param: Float[Array, ""],
     ) -> StickBreakingResult:
         safe_alpha_param = jnp.maximum(
-            jnp.asarray(alpha_param, dtype=jnp.float32),
-            ALPHA_SBP_FLOOR,  # ALPHA_SBP_FLOOR is now 1.0
+            jnp.asarray(alpha_param, dtype=jnp.float32), ALPHA_SBP_FLOOR
         )
 
         initial_state = _SBPLoopState(
@@ -127,12 +126,8 @@ def create_sbp_model(num_max_components: int):
 @jax.tree_util.register_dataclass
 @dataclass
 class CrossCatHyperparamsConfig:
-    bern_alpha: float = (
-        1.1  # MODIFIED FOR DEBUGGING: Set > 1 to avoid poles in Beta for Bernoulli params
-    )
-    bern_beta: float = (
-        1.1  # MODIFIED FOR DEBUGGING: Set > 1 to avoid poles in Beta for Bernoulli params
-    )
+    bern_alpha: float = 1.1
+    bern_beta: float = 1.1
     alpha_D_prior_shape: float = 1.0
     alpha_D_prior_rate: float = 1.0
     alpha_v_prior_shape: float = 1.0
@@ -199,12 +194,6 @@ def create_crosscat_model(
             jnp.maximum(hp_alpha_v_rate_in, 1e-7), dtype=jnp.float32
         )
 
-        # Parameters for the Beta distribution that generates Bernoulli parameters.
-        # These are now sourced from CrossCatHyperparamsConfig (defaulting to >1 for debugging)
-        # and further ensured to be >1 here.
-        # If these parameters are < 1, the Beta distribution has infinite density at 0 and 1.
-        # If a sample p_val_beta hits 0 or 1, its score could be 'inf', leading to
-        # an 'inf' overall trace score.
         _hp_bern_alpha = jnp.asarray(
             jnp.maximum(hp_bern_alpha_in, 1.0000001), dtype=jnp.float32
         )
@@ -281,9 +270,7 @@ def create_crosscat_model(
             for c_idx in range(max_categories):
                 for local_j_idx in range(max_cols_per_view):
                     p_val_beta = (
-                        beta(
-                            _hp_bern_alpha, _hp_bern_beta
-                        )  # Parameters are now ensured to be > 1
+                        beta(_hp_bern_alpha, _hp_bern_beta)
                         @ f"p_v{v_idx}_c{c_idx}_lc{local_j_idx}"
                     )
                     _bernoulli_params = _bernoulli_params.at[
@@ -429,7 +416,15 @@ def sample_alpha_D_gibbs_kernel(
     static_argnames=[
         "view_idx",
         "num_rows_static_val",
-        "max_categories_static_val",
+        # "max_categories_static_val", # This was the incorrect name in the error
+        "max_categories_val",  # Corrected to match the function signature if it's static
+        # However, max_categories_val is usually dynamic based on the model's configuration
+        # If it is intended to be static (fixed for JIT), it should be passed as such from test_crosscat_mcmc
+        # For now, assuming it's dynamic, so remove from static_argnames if it's not truly static across JIT calls.
+        # Based on the NameError and its suggestion, it seems this was intended to be the *value* from the main function.
+        # If the *value* can change, it CANNOT be a static_argname.
+        # The error was about 'max_categories_static_val' NOT being an arg of the kernel.
+        # The kernel arg is 'max_categories_val'. This one should be listed if static.
         "alpha_v_prior_shape_static",
         "alpha_v_prior_rate_static",
     ],
@@ -439,11 +434,21 @@ def sample_alpha_v_kernel(
     current_trace: Trace,
     view_idx: int,
     num_rows_static_val: int,
-    max_categories_val: int,  # Corrected from max_categories_static_val
+    max_categories_val: int,  # This is the actual argument name
     alpha_v_prior_shape_static: float,
     alpha_v_prior_rate_static: float,
     alpha_grid_dynamic: Float[Array, "grid_size"],
 ):
+    # If max_categories_val should be static for JIT compilation (i.e., its value doesn't change
+    # across different calls to a *specific compiled version* of this kernel for a given view_idx),
+    # then it should be listed in static_argnames. The NameError implied 'max_categories_static_val'
+    # was in static_argnames but not an argument, the actual argument 'max_categories_val' was used.
+    # For safety and common usage, values like max_categories usually come from model configuration
+    # and could be static if the configuration is fixed for the JIT.
+    # Let's assume it's intended to be static as per the error context.
+    # If not, it should be removed from static_argnames above.
+    # For this fix, I will ensure 'max_categories_val' is in static_argnames if it should be static.
+
     alpha_v_key_str = f"alpha_v_{view_idx}"
     row_cat_assignments_for_view = (
         current_trace.get_retval().latents.row_category_assignments_all_views[
@@ -454,7 +459,7 @@ def sample_alpha_v_kernel(
     if num_rows_static_val > 0:
         bincount_cat = jnp.bincount(
             row_cat_assignments_for_view.astype(jnp.int32),
-            length=max_categories_val,  # Corrected
+            length=max_categories_val,
         )
         kv_int = jnp.sum(bincount_cat > 0)
     else:
@@ -492,7 +497,9 @@ def test_crosscat_mcmc():
     num_rows_val, num_cols_val = observed_data_matrix.shape
 
     max_views_static_val = max(1, min(4, num_cols_val) if num_cols_val > 0 else 1)
-    max_categories_val = max(1, min(8, num_rows_val) if num_rows_val > 0 else 1)
+    max_categories_val_for_model = max(
+        1, min(8, num_rows_val) if num_rows_val > 0 else 1
+    )  # Renamed for clarity
     max_cols_per_view_val = max(1, num_cols_val if num_cols_val > 0 else 1)
 
     alpha_grid = jnp.linspace(
@@ -503,7 +510,7 @@ def test_crosscat_mcmc():
         f"Gibbs Sampling Test (alpha_D and alpha_v with Grid Sampling): Using observed_data with shape: rows={num_rows_val}, cols={num_cols_val}"
     )
     print(
-        f"Max views static: {max_views_static_val}, Max categories static: {max_categories_val}"
+        f"Max views static: {max_views_static_val}, Max categories static: {max_categories_val_for_model}"
     )
     print(
         f"Alpha grid size: {ALPHA_GRID_SIZE}, range: [{ALPHA_GRID_MIN}, {ALPHA_GRID_MAX}]"
@@ -531,7 +538,7 @@ def test_crosscat_mcmc():
         num_rows_static=num_rows_val,
         num_cols_static=num_cols_val,
         max_views_static=max_views_static_val,
-        max_categories_static=max_categories_val,
+        max_categories_static=max_categories_val_for_model,  # Use the renamed variable
         max_cols_per_view_static=max_cols_per_view_val,
     )
 
@@ -599,12 +606,15 @@ def test_crosscat_mcmc():
                     alpha_v_before_update = current_trace.get_choices()[alpha_v_key_str]
                     print(f"  {alpha_v_key_str} before update: {alpha_v_before_update}")
 
+                    # Ensure max_categories_val_for_model is passed to the kernel
+                    # if it's intended to be static for that kernel compilation.
+                    # The kernel argument is named max_categories_val.
                     current_trace = sample_alpha_v_kernel(
                         key_gibbs_alpha_v_list[v_idx_update],
                         current_trace,
                         v_idx_update,
                         num_rows_val,
-                        max_categories_val,  # Corrected
+                        max_categories_val_for_model,  # Pass the correct variable
                         hyperparams_config.alpha_v_prior_shape,
                         hyperparams_config.alpha_v_prior_rate,
                         alpha_grid,
