@@ -133,14 +133,14 @@ def tree_unflatten(tree_buffer: NodeBuffer, j: int, idx: int = 0) -> Node:
     if tree_buffer.is_leaf[j, idx]:
         return LeafNode(
             idx=idx,
-            value=tree_buffer.values[j, idx],
+            value=tree_buffer.values[j, idx],  # type: ignore
             interval=Interval(tree_buffer.lower[j, idx], tree_buffer.upper[j, idx]),
         )
     else:
         return InternalNode(
             idx=idx,
-            left=tree_unflatten(tree_buffer, j, tree_buffer.left_idx[j, idx]),
-            right=tree_unflatten(tree_buffer, j, tree_buffer.right_idx[j, idx]),
+            left=tree_unflatten(tree_buffer, j, int(tree_buffer.left_idx[j, idx])),  # type: ignore
+            right=tree_unflatten(tree_buffer, j, int(tree_buffer.right_idx[j, idx])),  # type: ignore
             interval=Interval(tree_buffer.lower[j, idx], tree_buffer.upper[j, idx]),
         )
 
@@ -189,7 +189,7 @@ def render_segments(trace: Trace) -> None:
 def get_value_at(x: float, node: Node) -> float:
     match node:
         case LeafNode():
-            return node.value
+            return float(node.value)  # type: ignore
         case InternalNode():
             if x < node.interval.lower or x >= node.interval.upper:
                 raise ValueError(f"x={x} is out of bounds for interval {node.interval}")
