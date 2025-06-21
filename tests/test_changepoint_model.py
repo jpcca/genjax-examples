@@ -9,10 +9,12 @@ from functools import partial
 import jax
 from jax import jit, vmap
 import jax.numpy as jnp
-from genjax import beta, flip, gen, scan, normal, Trace  # type: ignore
+from genjax import beta, flip, gen, scan, normal, Trace
 from jaxtyping import Array, Float, Bool, Integer, PRNGKeyArray
 
 from matplotlib import pyplot as plt
+from matplotlib.axes import Axes
+from matplotlib import cm
 
 MAX_DEPTH = 5
 MAX_NODES = 2 ** (MAX_DEPTH + 1) - 1
@@ -122,37 +124,8 @@ def binary_tree(buffer: NodeBuffer, idx: int) -> tuple[NodeBuffer, int]:
 
 @jit
 @partial(vmap, in_axes=(0, None))
-def sample_binary_tree(key: PRNGKeyArray, buffer: NodeBuffer) -> Trace:
+def binary_tree_simulate(key: PRNGKeyArray, buffer: NodeBuffer) -> Trace:
     return binary_tree.simulate(key, args=(buffer, buffer.idx))
-
-
-def test_changepoint_model():
-    colors = ["red", "blue", "green", "orange"]
-    N = len(colors)
-
-    trace: Trace = sample_binary_tree(
-        jax.random.split(jax.random.PRNGKey(42), N),
-        NodeBuffer(
-            lower=jnp.zeros([MAX_NODES]).at[0].set(0.0),
-            upper=jnp.zeros([MAX_NODES]).at[0].set(1.0),
-            values=jnp.zeros([MAX_NODES]),
-        ),
-    )
-
-    buffer, idx = trace.retval
-
-    fig, ax = plt.subplots(1, 1)
-    plt.title("Changepoint Segments")
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.xlim(0, 1)
-
-    for i in range(N):
-
-        tree = tree_unflatten(buffer, i)
-        render_node(ax, tree, colors[i])
-
-    fig.savefig("test_changepoint_model.png")
 
 
 # cpu-side, recursive tree builder
@@ -172,7 +145,7 @@ def tree_unflatten(tree_buffer: NodeBuffer, j: int, idx: int = 0) -> Node:
         )
 
 
-def render_node(ax: plt.Axes, node: Node, color: str) -> None:
+def render_node(ax: Axes, node: Node, color: str) -> None:
     match node:
         case LeafNode():
             ax.plot(
@@ -187,3 +160,55 @@ def render_node(ax: plt.Axes, node: Node, color: str) -> None:
 
         case _:
             raise ValueError(f"Unknown node type: {type(node)}")
+
+
+def render_segments(trace: Trace) -> None:
+    buffer, idx = trace.get_retval()
+    N, MAX_NODES = buffer.values.shape
+
+    fig, ax = plt.subplots(1, 1)
+    plt.title("Changepoint Segments")
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.xlim(0, 1)
+
+    rgba_colors = cm.get_cmap("viridis")(jnp.linspace(0, 1, N).tolist())
+    colors = [
+        f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
+        for r, g, b, a in rgba_colors
+    ]
+
+    for i in range(N):
+
+        tree = tree_unflatten(buffer, i)
+        render_node(ax, tree, colors[i])
+
+    fig.savefig("test_changepoint_model.png")
+
+
+def get_value_at(x: float, node: Node) -> float:
+    match node:
+        case LeafNode():
+            return node.value
+        case InternalNode():
+            if x < node.interval.lower or x >= node.interval.upper:
+                raise ValueError(f"x={x} is out of bounds for interval {node.interval}")
+            if x < (node.interval.lower + node.interval.upper) / 2:
+                return get_value_at(x, node.left)
+            else:
+                return get_value_at(x, node.right)
+        case _:
+            raise ValueError(f"Unknown node type: {type(node)}")
+
+
+def test_changepoint_model(n_samples: int = 4, seed: int = 42) -> None:
+
+    trace: Trace = binary_tree_simulate(
+        jax.random.split(jax.random.PRNGKey(seed), n_samples),
+        NodeBuffer(
+            lower=jnp.zeros([MAX_NODES]).at[0].set(0.0),
+            upper=jnp.zeros([MAX_NODES]).at[0].set(1.0),
+            values=jnp.zeros([MAX_NODES]),
+        ),
+    )
+    render_segments(trace)
