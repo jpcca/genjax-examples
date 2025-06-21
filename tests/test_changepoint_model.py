@@ -191,12 +191,22 @@ def get_value_at(x: float, node: Node) -> float:
         case LeafNode():
             return float(node.value)  # type: ignore
         case InternalNode():
-            if x < node.interval.lower or x >= node.interval.upper:
-                raise ValueError(f"x={x} is out of bounds for interval {node.interval}")
-            if x < (node.interval.lower + node.interval.upper) / 2:
-                return get_value_at(x, node.left)
-            else:
-                return get_value_at(x, node.right)
+            match node.left:
+                case LeafNode():
+                    if x <= node.left.interval.upper:
+                        return get_value_at(x, node.left)
+                    else:
+                        return get_value_at(x, node.right)
+
+                case InternalNode():
+                    if x <= node.left.interval.upper:
+                        return get_value_at(x, node.left)
+                    else:
+                        return get_value_at(x, node.right)
+
+                case _:
+                    raise ValueError(f"Unknown node type: {type(node.left)}")
+
         case _:
             raise ValueError(f"Unknown node type: {type(node)}")
 
