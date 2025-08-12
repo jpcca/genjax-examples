@@ -5,23 +5,25 @@ import matplotlib.pyplot as plt
 from genjax import (
     Arguments,
     ChoiceMap,
-    ChoiceMapBuilder,
+    Selection,
     Weight,
     gen,
     normal,
     GenerativeFunction,
 )
+
+from genjax._src.core.generative.choice_map import Static
 from jax import jit, random, vmap
 from jax.scipy.special import logsumexp
 from jax.scipy.stats import gaussian_kde
 from jaxtyping import Array, PRNGKeyArray
 
 
-def get_proposal(vars: set[str]) -> GenerativeFunction:
+def get_proposal(X: Static) -> GenerativeFunction:
     @gen
     def proposal(μ: Array, σ: Array):
-        for var in vars:
-            normal(μ, σ) @ var
+        for key in X.mapping.keys():
+            normal(μ, σ) @ key
 
     return proposal
 
@@ -39,7 +41,9 @@ def importance(
     trace = proposal.simulate(key, args=proposal_args)
     proposal_logpdf = trace.get_score()
 
-    target_logpdf, _ = model.assess(constraint ^ trace.get_sample(), args=model_args)
+    target_logpdf, _ = model.assess(
+        constraint.merge(trace.get_choices()), args=model_args
+    )
     return target_logpdf - proposal_logpdf
 
 
@@ -51,38 +55,31 @@ def model(μ: Array, σ: Array) -> tuple[Array, Array]:
 
 
 @jit
-@partial(vmap, in_axes=(0, 0, 0, None))
-def joint(key: PRNGKeyArray, x: Array, y: Array, args: Arguments) -> Weight:
-    logpdf, retval = model.assess(ChoiceMap.kw(x=x, y=y), args)
-    return logpdf
-
-
-def get_marginal(variable_name: str, all: set[str]) -> GenerativeFunction:
-    @jit
-    @partial(vmap, in_axes=(0, 0, None))
-    def marginal(
-        key: PRNGKeyArray, x: Array, args: Arguments, num: int = 5000
-    ) -> Weight:
-        keys = random.split(key, num=num)
-        weight = importance(
-            keys,
-            ChoiceMapBuilder[variable_name].set(x),
-            model,
-            args,
-            get_proposal(all - {variable_name}),
-            args,
-        )
-        return logsumexp(weight) - jnp.log(num)
-
-    return marginal
+@partial(vmap, in_axes=(0, None))
+def generate_samples(key: PRNGKeyArray, args: Arguments) -> ChoiceMap:
+    return model.simulate(key, args).get_choices()
 
 
 @jit
 @partial(vmap, in_axes=(0, None))
-def generate_samples(key: PRNGKeyArray, args: Arguments) -> tuple[Array, Array]:
-    trace = model.simulate(key, args)
-    samples = trace.get_sample()
-    return samples["x"], samples["y"]
+def joint(X: ChoiceMap, args: Arguments) -> Weight:
+    logpdf, retval = model.assess(X, args)
+    return logpdf
+
+
+def get_marginal(selection: Selection, num: int = 5000) -> GenerativeFunction:
+    @jit
+    @partial(vmap, in_axes=(0, 0, None))
+    def marginal(key: PRNGKeyArray, X: ChoiceMap, args: Arguments) -> Weight:
+        keys = random.split(key, num=num)
+
+        unselected = X.filter(selection.complement())
+        proposal = get_proposal(unselected)
+
+        weight = importance(keys, X.filter(selection), model, args, proposal, args)
+        return logsumexp(weight) - jnp.log(num)
+
+    return marginal
 
 
 def test_marginals():
@@ -93,39 +90,41 @@ def test_marginals():
     n_samples = 500
     keys = random.split(key, n_samples)
     key = keys[-1]
-    x, y = generate_samples(keys, args)
+    samples = generate_samples(keys, args)
 
     keys = random.split(key, n_samples)
     key = keys[-1]
-    logp = joint(keys, x, y, args)
+    logp = joint(samples, args)
 
     n_grid = 100
-    xgrid = jnp.linspace(-3, 3, n_grid)
-    ygrid = jnp.linspace(-0.5, 1.0, n_grid)
+    grid = ChoiceMap.kw(
+        x=jnp.linspace(-3, 3, n_grid),
+        y=jnp.linspace(-0.5, 1.0, n_grid),
+    )
 
-    px = gaussian_kde(x, bw_method=0.05).evaluate(xgrid)
-    py = gaussian_kde(y, bw_method=0.05).evaluate(ygrid)
+    px = gaussian_kde(samples["x"], bw_method=0.05).evaluate(grid["x"])
+    py = gaussian_kde(samples["y"], bw_method=0.05).evaluate(grid["y"])
 
     plt.figure(figsize=(6, 6))
 
-    plt.tricontourf(x, y, jnp.exp(logp), levels=20, cmap="Greys")
-    plt.scatter(x, y, s=1, color="black")
+    plt.tricontourf(samples["x"], samples["y"], jnp.exp(logp), levels=20, cmap="Greys")
+    plt.scatter(samples["x"], samples["y"], s=1, color="black")
 
     keys = random.split(key, n_grid)
     key = keys[-1]
 
-    logpy = get_marginal("y", {"x", "y"})(keys, ygrid, args)
+    logpy = get_marginal(Selection.at["y"])(keys, grid, args)
 
-    plt.plot(-jnp.exp(logpy), ygrid, color="orange")
-    plt.plot(-py, ygrid, color="darkcyan")
+    plt.plot(-jnp.exp(logpy), grid["y"], color="orange")
+    plt.plot(-py, grid["y"], color="darkcyan")
 
     keys = random.split(key, n_grid)
     key = keys[-1]
 
-    logpx = get_marginal("x", {"x", "y"})(keys, xgrid, args)
+    logpx = get_marginal(Selection.at["x"])(keys, grid, args)
 
-    plt.plot(xgrid, jnp.exp(logpx), color="orange", label="importance")
-    plt.plot(xgrid, px, label="kde", color="darkcyan")
+    plt.plot(grid["x"], jnp.exp(logpx), color="orange", label="importance")
+    plt.plot(grid["x"], px, label="kde", color="darkcyan")
 
     plt.xlim(-3, 3)
     plt.ylim(-0.5, 1.0)
