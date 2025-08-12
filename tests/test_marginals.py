@@ -19,13 +19,13 @@ from jax.scipy.stats import gaussian_kde
 from jaxtyping import Array, PRNGKeyArray
 
 
-def get_proposal(X: Static) -> GenerativeFunction:
+def proposal(X: Static) -> GenerativeFunction:
     @gen
-    def proposal(μ: Array, σ: Array):
+    def proposal_function(μ: Array, σ: Array):
         for key in X.mapping.keys():
             normal(μ, σ) @ key
 
-    return proposal
+    return proposal_function
 
 
 @jit
@@ -67,19 +67,23 @@ def joint(X: ChoiceMap, args: Arguments) -> Weight:
     return logpdf
 
 
-def get_marginal(selection: Selection, num: int = 5000) -> GenerativeFunction:
+def marginal(selection: Selection, num: int = 5000) -> GenerativeFunction:
     @jit
     @partial(vmap, in_axes=(0, 0, None))
-    def marginal(key: PRNGKeyArray, X: ChoiceMap, args: Arguments) -> Weight:
+    def marginal_function(key: PRNGKeyArray, X: ChoiceMap, args: Arguments) -> Weight:
         keys = random.split(key, num=num)
 
-        unselected = X.filter(selection.complement())
-        proposal = get_proposal(unselected)
-
-        weight = importance(keys, X.filter(selection), model, args, proposal, args)
+        weight = importance(
+            keys,
+            X.filter(selection),
+            model,
+            args,
+            proposal(X.filter(selection.complement())),
+            args,
+        )
         return logsumexp(weight) - jnp.log(num)
 
-    return marginal
+    return marginal_function
 
 
 def test_marginals():
@@ -90,10 +94,8 @@ def test_marginals():
     n_samples = 500
     keys = random.split(key, n_samples)
     key = keys[-1]
-    samples = generate_samples(keys, args)
 
-    keys = random.split(key, n_samples)
-    key = keys[-1]
+    samples = generate_samples(keys, args)
     logp = joint(samples, args)
 
     n_grid = 100
@@ -113,7 +115,7 @@ def test_marginals():
     keys = random.split(key, n_grid)
     key = keys[-1]
 
-    logpy = get_marginal(Selection.at["y"])(keys, grid, args)
+    logpy = marginal(Selection.at["y"])(keys, grid, args)
 
     plt.plot(-jnp.exp(logpy), grid["y"], color="orange")
     plt.plot(-py, grid["y"], color="darkcyan")
@@ -121,7 +123,7 @@ def test_marginals():
     keys = random.split(key, n_grid)
     key = keys[-1]
 
-    logpx = get_marginal(Selection.at["x"])(keys, grid, args)
+    logpx = marginal(Selection.at["x"])(keys, grid, args)
 
     plt.plot(grid["x"], jnp.exp(logpx), color="orange", label="importance")
     plt.plot(grid["x"], px, label="kde", color="darkcyan")
