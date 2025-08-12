@@ -179,3 +179,5 @@ cython_debug/
 
 # Dataset files
 /tests/data/1-example/
+
+*.png
