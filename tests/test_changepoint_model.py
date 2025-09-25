@@ -9,7 +9,17 @@ from functools import partial
 import jax
 from jax import jit, vmap
 import jax.numpy as jnp
-from genjax import beta, flip, gen, scan, normal, Trace, gamma
+from genjax import (
+    beta,
+    flip,
+    gen,
+    scan,
+    normal,
+    Trace,
+    ChoiceMap,
+    GenerativeFunction,
+    gamma,
+)
 from jaxtyping import Array, Float, Bool, Integer, PRNGKeyArray
 
 from matplotlib import pyplot as plt
@@ -155,9 +165,8 @@ def get_values_at(xs: Float[Array, "..."], buffer: NodeBuffer) -> Float[Array, "
 
 
 @gen
-def changepoint_model(
-    buffer: NodeBuffer, xs: Float[Array, "..."]
-) -> tuple[NodeBuffer, int]:
+def changepoint_model(xs: Float[Array, "..."]) -> tuple[NodeBuffer, int]:
+    buffer = NodeBuffer.from_array(xs)
     buffer, idx = binary_tree(buffer, buffer.idx) @ "binary_tree"
 
     noise = gamma(0.5, 0.5) @ "noise"
@@ -256,7 +265,7 @@ def test_changepoint_model_inference(seed: int = 42) -> None:
 
     trace: Trace = changepoint_model.simulate(
         jax.random.PRNGKey(seed),
-        args=(NodeBuffer.from_array(xs), xs),
+        args=(xs,),
     )
 
     fig, ax = render_segments(trace, return_figure=True)
@@ -271,3 +280,26 @@ def test_changepoint_model_inference(seed: int = 42) -> None:
     ax.legend()
     fig.savefig("test_changepoint_model.png")
     plt.close(fig)
+
+    key = jax.random.PRNGKey(seed)
+    ys = jnp.ones_like(xs) + 0.1 * jax.random.normal(
+        key, shape=xs.shape, dtype=xs.dtype
+    )
+    do_inference(changepoint_model, xs, ys)
+
+
+def do_inference(
+    model: GenerativeFunction,
+    xs: Float[Array, "..."],
+    ys: Float[Array, "..."],
+    seed: int = 42,
+) -> Trace:
+    observations = ChoiceMap.kw(
+        y=ys,
+    )
+
+    # Call importance_resampling to obtain a likely trace consistent
+    # with our observations.
+    key = jax.random.PRNGKey(seed)
+    trace = model.importance(key, observations, (xs,))
+    return trace
