@@ -76,6 +76,15 @@ class NodeBuffer:
         )
     )
 
+    @classmethod
+    def from_array(cls, array: Float[Array, "..."]) -> "NodeBuffer":
+        init_nan = jnp.full(shape=MAX_NODES, fill_value=jnp.nan)
+        return cls(
+            lower=init_nan.at[0].set(jnp.amin(array)),
+            upper=init_nan.at[0].set(jnp.amax(array)),
+            values=init_nan,
+        )
+
     @property
     def is_leaf(self) -> Bool[Array, "MAX_NODES"]:
         return (self.left_idx == -1) & (self.right_idx == -1)
@@ -87,15 +96,6 @@ class NodeBuffer:
     @property
     def ndim(self) -> int:
         return self.values.ndim
-
-
-def nodebuffer_from(xs: Float[Array, "..."]) -> NodeBuffer:
-    init_nan = jnp.full(shape=MAX_NODES, fill_value=jnp.nan)
-    return NodeBuffer(
-        lower=init_nan.at[0].set(jnp.amin(xs)),
-        upper=init_nan.at[0].set(jnp.amax(xs)),
-        values=init_nan,
-    )
 
 
 @gen
@@ -140,7 +140,7 @@ def binary_tree(buffer: NodeBuffer, idx: int) -> tuple[NodeBuffer, int]:
 @jit
 @partial(vmap, in_axes=(0, None))
 def binary_tree_simulate(key: PRNGKeyArray, xs: Float[Array, "..."]) -> Trace:
-    buffer = nodebuffer_from(xs)
+    buffer = NodeBuffer.from_array(xs)
     return binary_tree.simulate(key, args=(buffer, buffer.idx))
 
 
@@ -169,7 +169,7 @@ def changepoint_model(
 @jit
 @vmap
 def changepoint_model_simulate(key: PRNGKeyArray, xs: Float[Array, "..."]) -> Trace:
-    return changepoint_model.simulate(key, args=(nodebuffer_from(xs), xs))
+    return changepoint_model.simulate(key, args=(NodeBuffer.from_array(xs), xs))
 
 
 # cpu-side, recursive tree builder
@@ -256,7 +256,7 @@ def test_changepoint_model_inference(seed: int = 42) -> None:
 
     trace: Trace = changepoint_model.simulate(
         jax.random.PRNGKey(seed),
-        args=(nodebuffer_from(xs), xs),
+        args=(NodeBuffer.from_array(xs), xs),
     )
 
     fig, ax = render_segments(trace, return_figure=True)
