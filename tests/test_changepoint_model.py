@@ -139,7 +139,8 @@ def binary_tree(buffer: NodeBuffer, idx: int) -> tuple[NodeBuffer, int]:
 
 @jit
 @partial(vmap, in_axes=(0, None))
-def binary_tree_simulate(key: PRNGKeyArray, buffer: NodeBuffer) -> Trace:
+def binary_tree_simulate(key: PRNGKeyArray, xs: Float[Array, "..."]) -> Trace:
+    buffer = nodebuffer_from(xs)
     return binary_tree.simulate(key, args=(buffer, buffer.idx))
 
 
@@ -163,6 +164,12 @@ def changepoint_model(
     normal(get_values_at(xs, buffer), noise) @ "y"
 
     return buffer, idx
+
+
+@jit
+@vmap
+def changepoint_model_simulate(key: PRNGKeyArray, xs: Float[Array, "..."]) -> Trace:
+    return changepoint_model.simulate(key, args=(nodebuffer_from(xs), xs))
 
 
 # cpu-side, recursive tree builder
@@ -238,7 +245,7 @@ def test_changepoint_model(n_samples: int = 4, seed: int = 42) -> None:
 
     trace: Trace = binary_tree_simulate(
         jax.random.split(jax.random.PRNGKey(seed), n_samples),
-        nodebuffer_from(xs),
+        xs,
     )
 
     render_segments(trace)
