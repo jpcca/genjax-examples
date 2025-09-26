@@ -310,7 +310,7 @@ def test_changepoint_model_inference(seed: int = 42, noise: float = 0.1) -> None
     xs = jnp.linspace(0, 10, num=50)
 
     noise = noise * jax.random.normal(key, shape=xs.shape, dtype=xs.dtype)
-    ys = (jnp.floor(jnp.abs(xs / 3)).astype(int) + 1) % 3 + noise
+    ys = (jnp.floor(jnp.abs(xs / 4)).astype(int) + 1) % 3 + noise
 
     keys = jax.random.split(key, num=12)
     model = changepoint_model
