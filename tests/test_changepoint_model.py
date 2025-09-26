@@ -155,7 +155,7 @@ def branch(buffer: NodeBuffer, idx: int) -> tuple[NodeBuffer, int]:
 def binary_tree(buffer: NodeBuffer, idx: int) -> tuple[NodeBuffer, int]:
     args = (buffer, idx)
 
-    is_leaf = flip(0.7) @ f"is_leaf_{idx}"
+    is_leaf = flip(0.5) @ f"is_leaf_{idx}"
     return (
         leaf.or_else(branch)(buffer.is_leaf[idx] | is_leaf, args, args)
         @ f"leaf_or_else_branch_{idx}"
@@ -188,12 +188,6 @@ def changepoint_model(xs: Float[Array, "..."]) -> tuple[NodeBuffer, int]:
     normal(get_values_at(xs, buffer), noise) @ "y"
 
     return buffer, idx
-
-
-@jit
-@vmap
-def changepoint_model_simulate(key: PRNGKeyArray, xs: Float[Array, "..."]) -> Trace:
-    return changepoint_model.simulate(key, args=(NodeBuffer.from_array(xs), xs))
 
 
 @jit
@@ -299,7 +293,7 @@ def render_segments(
         plt.close(fig)
 
 
-def test_changepoint_model(n_samples: int = 4, seed: int = 42) -> None:
+def test_binary_tree(n_samples: int = 4, seed: int = 42) -> None:
     xs = jnp.array([0, 1])
 
     trace: Trace = binary_tree_simulate(
