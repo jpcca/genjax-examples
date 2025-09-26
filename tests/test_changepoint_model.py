@@ -275,6 +275,12 @@ def render_segments(
     weights = (
         jnp.exp(weights - jax.scipy.special.logsumexp(weights))
         if weights is not None
+        else None
+    )
+
+    weights = (
+        weights.at[jnp.argmax(weights)].set(1.0)
+        if weights is not None
         else jnp.ones(N) / N
     )
 
@@ -312,7 +318,7 @@ def test_changepoint_model_inference(seed: int = 42, noise: float = 0.1) -> None
     noise = noise * jax.random.normal(key, shape=xs.shape, dtype=xs.dtype)
     ys = (jnp.floor(jnp.abs(xs / 4)).astype(int) + 1) % 3 + noise
 
-    keys = jax.random.split(key, num=12)
+    keys = jax.random.split(key, num=20)
     model = changepoint_model
 
     constraint = ChoiceMap.kw(y=ys)
