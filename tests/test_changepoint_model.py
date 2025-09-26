@@ -24,12 +24,12 @@ from genjax import (
     ChoiceMap,
     gamma,
     Weight,
+    GenerativeFunction,
 )
 from jaxtyping import Array, Float, Bool, Integer, PRNGKeyArray
 
 from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
-from matplotlib import cm
 
 MAX_DEPTH = 5
 MAX_NODES = 2 ** (MAX_DEPTH + 1) - 1
@@ -196,6 +196,34 @@ def changepoint_model_simulate(key: PRNGKeyArray, xs: Float[Array, "..."]) -> Tr
     return changepoint_model.simulate(key, args=(NodeBuffer.from_array(xs), xs))
 
 
+@jit
+@partial(vmap, in_axes=(0, None, None, None))
+def importance(
+    key: PRNGKeyArray, model: GenerativeFunction, constraint: ChoiceMap, args: Arguments
+) -> Trace:
+    return model.importance(key, constraint, args)
+
+
+@jit
+@partial(vmap, in_axes=(0, None, None, None))
+def importance_resampling(
+    key: PRNGKeyArray,
+    model: GenerativeFunction,
+    constraint: ChoiceMap,
+    args: Arguments,
+    num: int = 100_000,
+) -> tuple[NodeBuffer, Weight]:
+    key, subkey = jax.random.split(key)
+    keys = jax.random.split(subkey, num)
+
+    trace, weights = importance(keys, model, constraint, args)
+    weights -= jax.scipy.special.logsumexp(weights)
+    index = jax.random.categorical(key, weights)
+
+    buffer, idx = trace.get_retval()
+    return buffer[index], weights[index]
+
+
 # cpu-side, recursive tree builder
 def tree_unflatten(tree_buffer: NodeBuffer, j: int, idx: int = 0) -> Node:
     if tree_buffer.is_leaf[j, idx]:
@@ -213,20 +241,20 @@ def tree_unflatten(tree_buffer: NodeBuffer, j: int, idx: int = 0) -> Node:
         )
 
 
-def render_node(ax: Axes, node: Node, color: str, weight: float) -> None:
+def render_node(ax: Axes, node: Node, alpha: float | None = None) -> None:
     match node:
         case LeafNode():
             ax.plot(
                 [node.interval.lower, node.interval.upper],
                 [node.value, node.value],
                 linewidth=5,
-                color=color,
-                alpha=weight,
+                color="k",
+                alpha=alpha,
                 zorder=-1,
             )
         case InternalNode():
-            render_node(ax, node.left, color, weight)
-            render_node(ax, node.right, color, weight)
+            render_node(ax, node.left, alpha)
+            render_node(ax, node.right, alpha)
 
         case _:
             raise ValueError(f"Unknown node type: {type(node)}")
@@ -234,9 +262,8 @@ def render_node(ax: Axes, node: Node, color: str, weight: float) -> None:
 
 def render_segments(
     buffer: NodeBuffer,
+    weights: Float[Array, "..."] = None,
     return_figure: bool = False,
-    weights: Float[Array, "..."] | None = None,
-    indeces: Integer[Array, "..."] | None = None,
 ) -> None | tuple[plt.Figure, Axes]:
     N = buffer.shape[0] if buffer.ndim > 1 else 1
 
@@ -245,45 +272,20 @@ def render_segments(
     plt.xlabel("x")
     plt.ylabel("y")
 
-    rgba_colors = cm.get_cmap("viridis")(jnp.linspace(0, 0.1, N).tolist())
-    colors = [
-        f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
-        for r, g, b, a in rgba_colors
-    ]
+    weights = (
+        jnp.exp(weights - jax.scipy.special.logsumexp(weights))
+        if weights is not None
+        else jnp.ones(N) / N
+    )
 
-    # max_weight, min_weight = jnp.percentile(weights, 100), jnp.percentile(weights, 80)
-    # weights = (
-    #     (weights - min_weight) / (max_weight - min_weight)
-    #     if weights is not None
-    #     else None
-    # )
-
-    weights = 0.5 * jnp.clip(weights, 0, 1.0) if weights is not None else None
-
-    if indeces is None:
-        if buffer.ndim > 1:
-            for i in range(N):
-                tree = tree_unflatten(buffer, i)
-                render_node(
-                    ax,
-                    tree,
-                    colors[i],
-                    weight=weights[i].item() if weights is not None else 1.0,
-                )
-        else:
-            tree = tree_unflatten(buffer, Ellipsis)
-            render_node(
-                ax, tree, colors[0], weights.item() if weights is not None else 1.0
-            )
-    else:
-        for i in indeces:
+    if buffer.ndim > 1:
+        for i in range(N):
             tree = tree_unflatten(buffer, i)
-            render_node(
-                ax,
-                tree,
-                colors[i],
-                weight=weights[i].item() if weights is not None else 1.0,
-            )
+            render_node(ax, tree, alpha=weights[i].item())
+    else:
+        tree = tree_unflatten(buffer, Ellipsis)
+        render_node(ax, tree)
+
     if return_figure:
         return fig, ax
     else:
@@ -303,53 +305,24 @@ def test_changepoint_model(n_samples: int = 4, seed: int = 42) -> None:
     render_segments(buffer)
 
 
-@jit
-@partial(vmap, in_axes=(0, None, None))
-def changepoint_model_importance(
-    key: PRNGKeyArray, constraint: ChoiceMap, args: Arguments
-) -> Trace:
-    return changepoint_model.importance(key, constraint, args)
-
-
-def test_changepoint_model_inference(seed: int = 42) -> None:
+def test_changepoint_model_inference(seed: int = 42, noise: float = 0.1) -> None:
     key = jax.random.PRNGKey(seed)
+    xs = jnp.linspace(-5, 5, num=50)
 
-    xs = [jnp.linspace(-5, 0, num=50), jnp.linspace(0, 5, num=50)]
-    ys = [
-        jnp.ones_like(xs[0])
-        + 0.1 * jax.random.normal(key, shape=xs[0].shape, dtype=xs[0].dtype),
-        -2 * jnp.ones_like(xs[1])
-        + 0.5 * jax.random.normal(key, shape=xs[1].shape, dtype=xs[1].dtype),
-    ]
+    noise = noise * jax.random.normal(key, shape=xs.shape, dtype=xs.dtype)
+    ys = jnp.where(jnp.floor(jnp.abs(xs / 3)).astype(int) % 2 == 0, 2, 0) + noise
 
-    xs = jnp.concatenate(xs)
-    ys = jnp.concatenate(ys)
+    keys = jax.random.split(key, num=20)
+    model = changepoint_model
 
-    keys = jax.random.split(key, num=10)
     constraint = ChoiceMap.kw(y=ys)
     args = (xs,)
 
-    buffer, weights = importance_resampling(keys, constraint, args)
+    buffer, weights = importance_resampling(keys, model, constraint, args)
 
-    fig, ax = render_segments(buffer, return_figure=True)
-    ax.scatter(jnp.expand_dims(xs, axis=0), ys, s=3, label="data", color="gray")
+    fig, ax = render_segments(buffer, weights, return_figure=True)
+    ax.scatter(jnp.expand_dims(xs, axis=0), ys, s=3, color="k")
 
     ax.legend()
     fig.savefig("test_changepoint_model.png")
     plt.close(fig)
-
-
-@jit
-@partial(vmap, in_axes=(0, None, None))
-def importance_resampling(
-    key: PRNGKeyArray, constraint: ChoiceMap, args: Arguments, num: int = 100000
-) -> tuple[NodeBuffer, Weight]:
-    key, subkey = jax.random.split(key)
-    keys = jax.random.split(subkey, num)
-
-    trace, weights = changepoint_model_importance(keys, constraint, args)
-    weights = weights - jax.scipy.special.logsumexp(weights)
-    index = jax.random.categorical(key, weights)
-
-    buffer, idx = trace.get_retval()
-    return buffer[index], weights[index]
