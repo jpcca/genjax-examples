@@ -307,12 +307,12 @@ def test_changepoint_model(n_samples: int = 4, seed: int = 42) -> None:
 
 def test_changepoint_model_inference(seed: int = 42, noise: float = 0.1) -> None:
     key = jax.random.PRNGKey(seed)
-    xs = jnp.linspace(-5, 5, num=50)
+    xs = jnp.linspace(0, 10, num=50)
 
     noise = noise * jax.random.normal(key, shape=xs.shape, dtype=xs.dtype)
-    ys = jnp.where(jnp.floor(jnp.abs(xs / 3)).astype(int) % 2 == 0, 2, 0) + noise
+    ys = (jnp.floor(jnp.abs(xs / 3)).astype(int) + 1) % 3 + noise
 
-    keys = jax.random.split(key, num=20)
+    keys = jax.random.split(key, num=12)
     model = changepoint_model
 
     constraint = ChoiceMap.kw(y=ys)
