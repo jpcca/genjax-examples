@@ -155,7 +155,7 @@ def branch(buffer: NodeBuffer, idx: int) -> tuple[NodeBuffer, int]:
 def binary_tree(buffer: NodeBuffer, idx: int) -> tuple[NodeBuffer, int]:
     args = (buffer, idx)
 
-    is_leaf = flip(0.5) @ f"is_leaf_{idx}"
+    is_leaf = flip(0.7) @ f"is_leaf_{idx}"
     return (
         leaf.or_else(branch)(buffer.is_leaf[idx] | is_leaf, args, args)
         @ f"leaf_or_else_branch_{idx}"
@@ -279,7 +279,7 @@ def render_segments(
     )
 
     weights = (
-        weights.at[jnp.argmax(weights)].set(1.0)
+        weights.at[weights == jnp.amax(weights)].set(1.0)
         if weights is not None
         else jnp.ones(N) / N
     )
@@ -313,12 +313,12 @@ def test_changepoint_model(n_samples: int = 4, seed: int = 42) -> None:
 
 def test_changepoint_model_inference(seed: int = 42, noise: float = 0.1) -> None:
     key = jax.random.PRNGKey(seed)
-    xs = jnp.linspace(0, 10, num=50)
+    xs = jnp.linspace(-5, 5, num=50)
 
     noise = noise * jax.random.normal(key, shape=xs.shape, dtype=xs.dtype)
-    ys = (jnp.floor(jnp.abs(xs / 4)).astype(int) + 1) % 3 + noise
+    ys = (jnp.floor(jnp.abs((xs + 5) / 4)).astype(int) + 1) % 3 + noise
 
-    keys = jax.random.split(key, num=20)
+    keys = jax.random.split(key, num=12)
     model = changepoint_model
 
     constraint = ChoiceMap.kw(y=ys)
