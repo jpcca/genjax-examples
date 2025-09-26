@@ -6,10 +6,15 @@ from abc import ABC
 from dataclasses import dataclass, field
 from functools import partial
 
+
 import jax
 from jax import jit, vmap
+
 import jax.numpy as jnp
+
+
 from genjax import (
+    Arguments,
     beta,
     flip,
     gen,
@@ -17,8 +22,8 @@ from genjax import (
     normal,
     Trace,
     ChoiceMap,
-    GenerativeFunction,
     gamma,
+    Weight,
 )
 from jaxtyping import Array, Float, Bool, Integer, PRNGKeyArray
 
@@ -106,6 +111,16 @@ class NodeBuffer:
     @property
     def ndim(self) -> int:
         return self.values.ndim
+
+    def __getitem__(self, idx: int | slice) -> "NodeBuffer":
+        return NodeBuffer(
+            lower=self.lower[idx],
+            upper=self.upper[idx],
+            values=self.values[idx],
+            idx=self.idx,
+            left_idx=self.left_idx[idx],
+            right_idx=self.right_idx[idx],
+        )
 
 
 @gen
@@ -198,7 +213,7 @@ def tree_unflatten(tree_buffer: NodeBuffer, j: int, idx: int = 0) -> Node:
         )
 
 
-def render_node(ax: Axes, node: Node, color: str) -> None:
+def render_node(ax: Axes, node: Node, color: str, weight: float) -> None:
     match node:
         case LeafNode():
             ax.plot(
@@ -206,21 +221,23 @@ def render_node(ax: Axes, node: Node, color: str) -> None:
                 [node.value, node.value],
                 linewidth=5,
                 color=color,
+                alpha=weight,
                 zorder=-1,
             )
         case InternalNode():
-            render_node(ax, node.left, color)
-            render_node(ax, node.right, color)
+            render_node(ax, node.left, color, weight)
+            render_node(ax, node.right, color, weight)
 
         case _:
             raise ValueError(f"Unknown node type: {type(node)}")
 
 
 def render_segments(
-    trace: Trace, return_figure: bool = False
+    buffer: NodeBuffer,
+    return_figure: bool = False,
+    weights: Float[Array, "..."] | None = None,
+    indeces: Integer[Array, "..."] | None = None,
 ) -> None | tuple[plt.Figure, Axes]:
-    buffer, idx = trace.get_retval()
-    choices = trace.get_choices()
     N = buffer.shape[0] if buffer.ndim > 1 else 1
 
     fig, ax = plt.subplots(1, 1)
@@ -228,20 +245,45 @@ def render_segments(
     plt.xlabel("x")
     plt.ylabel("y")
 
-    rgba_colors = cm.get_cmap("viridis")(jnp.linspace(0, 1, N).tolist())
+    rgba_colors = cm.get_cmap("viridis")(jnp.linspace(0, 0.1, N).tolist())
     colors = [
         f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
         for r, g, b, a in rgba_colors
     ]
 
-    if buffer.ndim > 1:
-        for i in range(N):
-            tree = tree_unflatten(buffer, i)
-            render_node(ax, tree, colors[i])
-    else:
-        tree = tree_unflatten(buffer, Ellipsis)
-        render_node(ax, tree, colors[0])
+    # max_weight, min_weight = jnp.percentile(weights, 100), jnp.percentile(weights, 80)
+    # weights = (
+    #     (weights - min_weight) / (max_weight - min_weight)
+    #     if weights is not None
+    #     else None
+    # )
 
+    weights = 0.5 * jnp.clip(weights, 0, 1.0) if weights is not None else None
+
+    if indeces is None:
+        if buffer.ndim > 1:
+            for i in range(N):
+                tree = tree_unflatten(buffer, i)
+                render_node(
+                    ax,
+                    tree,
+                    colors[i],
+                    weight=weights[i].item() if weights is not None else 1.0,
+                )
+        else:
+            tree = tree_unflatten(buffer, Ellipsis)
+            render_node(
+                ax, tree, colors[0], weights.item() if weights is not None else 1.0
+            )
+    else:
+        for i in indeces:
+            tree = tree_unflatten(buffer, i)
+            render_node(
+                ax,
+                tree,
+                colors[i],
+                weight=weights[i].item() if weights is not None else 1.0,
+            )
     if return_figure:
         return fig, ax
     else:
@@ -257,49 +299,57 @@ def test_changepoint_model(n_samples: int = 4, seed: int = 42) -> None:
         xs,
     )
 
-    render_segments(trace)
+    buffer, _ = trace.get_retval()
+    render_segments(buffer)
+
+
+@jit
+@partial(vmap, in_axes=(0, None, None))
+def changepoint_model_importance(
+    key: PRNGKeyArray, constraint: ChoiceMap, args: Arguments
+) -> Trace:
+    return changepoint_model.importance(key, constraint, args)
 
 
 def test_changepoint_model_inference(seed: int = 42) -> None:
-    xs = jnp.linspace(-5, 5, num=50)
+    key = jax.random.PRNGKey(seed)
 
-    trace: Trace = changepoint_model.simulate(
-        jax.random.PRNGKey(seed),
-        args=(xs,),
-    )
+    xs = [jnp.linspace(-5, 0, num=50), jnp.linspace(0, 5, num=50)]
+    ys = [
+        jnp.ones_like(xs[0])
+        + 0.1 * jax.random.normal(key, shape=xs[0].shape, dtype=xs[0].dtype),
+        -2 * jnp.ones_like(xs[1])
+        + 0.5 * jax.random.normal(key, shape=xs[1].shape, dtype=xs[1].dtype),
+    ]
 
-    fig, ax = render_segments(trace, return_figure=True)
+    xs = jnp.concatenate(xs)
+    ys = jnp.concatenate(ys)
 
-    buffer, idx = trace.get_retval()
-    choices = trace.get_choices()
+    keys = jax.random.split(key, num=10)
+    constraint = ChoiceMap.kw(y=ys)
+    args = (xs,)
 
-    for name in ["y"]:
-        _xs = jnp.arange(choices[name].shape[0])
-        ax.scatter(xs, choices[name], s=1, label=name)
+    buffer, weights = importance_resampling(keys, constraint, args)
+
+    fig, ax = render_segments(buffer, return_figure=True)
+    ax.scatter(jnp.expand_dims(xs, axis=0), ys, s=3, label="data", color="gray")
 
     ax.legend()
     fig.savefig("test_changepoint_model.png")
     plt.close(fig)
 
-    key = jax.random.PRNGKey(seed)
-    ys = jnp.ones_like(xs) + 0.1 * jax.random.normal(
-        key, shape=xs.shape, dtype=xs.dtype
-    )
-    do_inference(changepoint_model, xs, ys)
 
+@jit
+@partial(vmap, in_axes=(0, None, None))
+def importance_resampling(
+    key: PRNGKeyArray, constraint: ChoiceMap, args: Arguments, num: int = 100000
+) -> tuple[NodeBuffer, Weight]:
+    key, subkey = jax.random.split(key)
+    keys = jax.random.split(subkey, num)
 
-def do_inference(
-    model: GenerativeFunction,
-    xs: Float[Array, "..."],
-    ys: Float[Array, "..."],
-    seed: int = 42,
-) -> Trace:
-    observations = ChoiceMap.kw(
-        y=ys,
-    )
+    trace, weights = changepoint_model_importance(keys, constraint, args)
+    weights = weights - jax.scipy.special.logsumexp(weights)
+    index = jax.random.categorical(key, weights)
 
-    # Call importance_resampling to obtain a likely trace consistent
-    # with our observations.
-    key = jax.random.PRNGKey(seed)
-    trace = model.importance(key, observations, (xs,))
-    return trace
+    buffer, idx = trace.get_retval()
+    return buffer[index], weights[index]
