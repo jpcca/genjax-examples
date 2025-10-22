@@ -17,17 +17,6 @@ readme = "README.md"
 requires-python = ">=3.11,<4.0"
 version = "0.1.0"
 
-[tool.poetry]
-packages = [{include = "genjax_examples", from = "src"}]
-
-[tool.poetry.group.dev.dependencies]
-pandas-stubs = "^2.2.3.250308"
-pytest = "^8.3.5"
-
-[build-system]
-build-backend = "poetry.core.masonry.api"
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-
 [tool.pytest.ini_options]
 filterwarnings = [
   "ignore::DeprecationWarning",
