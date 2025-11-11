@@ -17,6 +17,8 @@ from jax import jit, vmap, lax
 from genjax import gen, Const
 from genjax import normal, gamma, dirichlet, categorical
 
+import matplotlib.pyplot as plt
+
 
 # =====================================================
 # Utilities
@@ -428,8 +430,74 @@ def test_main():
         cfg=MCMCConfig(
             num_iters=2000, burn_in=1000, thin=10, mh_step_kd=0.03, mh_step_n=0.03
         ),
+        # Wider priors to increase posterior spread
+        shape_kd=4.0,
+        rate_kd=0.2,
+        shape_n=1.0,
+        rate_n=0.5,
     )
     print("[posterior mean] weights:", out["post_w"])
-    print("[posterior mean] Kd     :", out["post_kd"])
-    print("[posterior mean] n      :", out["post_n"])
-    print("[accept rates] kd, n    :", out["acc_kd"], out["acc_n"])
+    # Note: no post_alpha in output; weights shown above
+    print("[posterior mean] beta(Kd):", out["post_kd"])
+    print("[posterior mean] gamma(n):", out["post_n"])
+    if "acc_alpha" in out:
+        print(
+            "[accept rates] alpha, kd, n:",
+            out["acc_alpha"],
+            out["acc_kd"],
+            out["acc_n"],
+        )
+    else:
+        print("[accept rates] kd, n    :", out["acc_kd"], out["acc_n"])
+
+    # Plot: data (orange), 3 posterior-mean Hill curves (black),
+    # and for the last 500 samples, each component's Hill curve in gray.
+
+    # Collect last 500 samples by advancing from the last state
+    last_kds = []
+    last_ns = []
+    st = out["last_state"]
+    mh_cfg = MHConfig(0.03, 0.03)
+    for _ in range(500):
+        st, _ = mcmc_step(
+            st,
+            xs,
+            ys,
+            alpha,
+            100.0,
+            5.0,
+            4.0,
+            2.0,
+            0.02,
+            mh_cfg,
+        )
+        last_kds.append(st.Kd)
+        last_ns.append(st.n)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.scatter(xs, ys, s=10, color="orange", edgecolors="none", label="data")
+
+    # Last 500 sample component curves (gray)
+    for i in range(len(last_kds)):
+        for k in range(3):
+            mu_i_k = hill(xs, last_kds[i][k], last_ns[i][k])
+            ax.plot(xs, mu_i_k, color="#888888", alpha=0.3, linewidth=1)
+
+    # Posterior-mean component curves (black)
+    for k in range(3):
+        # Use posterior means correctly: hill(x, kd, n)
+        mu_post_k = hill(xs, out["post_kd"][k], out["post_n"][k])
+        ax.plot(
+            xs,
+            mu_post_k,
+            color="black",
+            linewidth=2,
+            label="posterior mean" if k == 0 else None,
+        )
+
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_title("Mixture of Hill Functions: Data and Posterior Curves")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig("mix_hill_plot.png", dpi=150)
