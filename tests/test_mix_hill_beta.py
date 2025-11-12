@@ -17,7 +17,7 @@ from genjax import Const  # type: ignore
 # Utilities
 # ------------------------------
 def hill(x, kd, n, eps=1e-6):
-    x = jnp.maximum(jnp.asarray(x, jnp.float32), eps)
+    x = jnp.maximum(x, eps)
     return 1.0 / (1.0 + (kd / x) ** n)
 
 
@@ -40,7 +40,7 @@ def mix_hill_vec(
     rate_n=2.0,
     sigma=0.02,
 ):
-    xs = jnp.asarray(xs)
+    xs = xs
     N = xs.shape[0]
     K = 3
 
@@ -214,7 +214,7 @@ def run_inference_genjax_only(
 
 def make_obs_from_y(y_obs):
     obs = ChoiceMap.empty()
-    obs = obs.at["y"].set(jnp.asarray(y_obs))
+    obs = obs.at["y"].set(y_obs)
     return obs
 
 
