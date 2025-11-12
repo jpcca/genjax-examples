@@ -392,9 +392,20 @@ def run_mcmc(
     mh_cfg = MHConfig(cfg.mh_step_kd, cfg.mh_step_n, cfg.mh_step_a)
 
     def one_step(carry, _):
-        st, t, sum_w, sum_kd, sum_n, sum_a, acc_kd_sum, acc_n_sum, acc_a_sum, kept = (
-            carry
-        )
+        (
+            st,
+            t,
+            sum_w,
+            sum_kd,
+            sum_n,
+            sum_a,
+            sum_comp_mu,
+            sum_comp_mu2,
+            acc_kd_sum,
+            acc_n_sum,
+            acc_a_sum,
+            kept,
+        ) = carry
         st, (acc_kd, acc_n, acc_a) = mcmc_step(
             st,
             xs,
@@ -411,10 +422,19 @@ def run_mcmc(
         )
         t = t + 1
         do_keep = (t > cfg.burn_in) & ((t - cfg.burn_in) % cfg.thin == 0)
+        # Accumulate parameter means
         sum_w = jnp.where(do_keep, sum_w + st.weights, sum_w)
         sum_kd = jnp.where(do_keep, sum_kd + st.Kd, sum_kd)
         sum_n = jnp.where(do_keep, sum_n + st.n, sum_n)
         sum_a = jnp.where(do_keep, sum_a + st.A, sum_a)
+
+        # Accumulate per-component predictive mean moments at observed xs
+        # Build (N,K) base curve values, then scale by A
+        xs_safe = jnp.maximum(xs, 1e-6)
+        base = 1.0 / (1.0 + (st.Kd[None, :] / xs_safe[:, None]) ** st.n[None, :])  # (N,K)
+        mu_all = base * st.A[None, :]  # (N,K)
+        sum_comp_mu = jnp.where(do_keep, sum_comp_mu + mu_all, sum_comp_mu)
+        sum_comp_mu2 = jnp.where(do_keep, sum_comp_mu2 + mu_all * mu_all, sum_comp_mu2)
         acc_kd_sum = acc_kd_sum + acc_kd
         acc_n_sum = acc_n_sum + acc_n
         acc_a_sum = acc_a_sum + acc_a
@@ -426,6 +446,8 @@ def run_mcmc(
             sum_kd,
             sum_n,
             sum_a,
+            sum_comp_mu,
+            sum_comp_mu2,
             acc_kd_sum,
             acc_n_sum,
             acc_a_sum,
@@ -440,20 +462,39 @@ def run_mcmc(
         jnp.zeros((K,)),
         jnp.zeros((K,)),
         jnp.zeros((K,)),
+        jnp.zeros((xs.shape[0], K)),
+        jnp.zeros((xs.shape[0], K)),
         jnp.zeros((K,)),
         jnp.zeros((K,)),
         jnp.zeros((K,)),
         jnp.array(0),
     )
 
-    (st, t, sum_w, sum_kd, sum_n, sum_a, acc_kd_sum, acc_n_sum, acc_a_sum, kept), _ = (
+    (
+        st,
+        t,
+        sum_w,
+        sum_kd,
+        sum_n,
+        sum_a,
+        sum_comp_mu,
+        sum_comp_mu2,
+        acc_kd_sum,
+        acc_n_sum,
+        acc_a_sum,
+        kept,
+    ), _ = (
         lax.scan(one_step, carry0, xs=None, length=cfg.num_iters)
     )
     kept = jnp.maximum(kept, 1)
+    denom = kept.astype(sum_comp_mu.dtype)
     post_w = sum_w / kept
     post_kd = sum_kd / kept
     post_n = sum_n / kept
     post_a = sum_a / kept
+    post_comp_mean = sum_comp_mu / denom
+    post_comp_var = jnp.maximum(0.0, sum_comp_mu2 / denom - post_comp_mean * post_comp_mean)
+    post_comp_std = jnp.sqrt(post_comp_var)
     acc_kd_rate = acc_kd_sum / cfg.num_iters
     acc_n_rate = acc_n_sum / cfg.num_iters
     acc_a_rate = acc_a_sum / cfg.num_iters
@@ -463,6 +504,8 @@ def run_mcmc(
         post_kd=post_kd,
         post_n=post_n,
         post_a=post_a,
+        post_comp_mean=post_comp_mean,
+        post_comp_std=post_comp_std,
         acc_kd=acc_kd_rate,
         acc_n=acc_n_rate,
         acc_a=acc_a_rate,
@@ -475,7 +518,19 @@ def run_mcmc(
 # =====================================================
 
 
-def _plot_group(xs, ys, post_w, post_kd, post_n, post_a, st_last, title, out_png):
+def _plot_group(
+    xs,
+    ys,
+    post_w,
+    post_kd,
+    post_n,
+    post_a,
+    post_comp_mean,
+    post_comp_std,
+    st_last,
+    title,
+    out_png,
+):
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.scatter(xs, ys, s=10, color="orange", edgecolors="none", label="data")
 
@@ -518,9 +573,20 @@ def _plot_group(xs, ys, post_w, post_kd, post_n, post_a, st_last, title, out_png
     # Draw lighter first, heavier last to make weight effect visible
     order_k = list(jnp.argsort(post_w))  # ascending
     for idx, k in enumerate(order_k):
-        w_k = float(post_w[int(k)])
-        mu_post_k = post_a[int(k)] * hill(xs_line, post_kd[int(k)], post_n[int(k)])
+        k = int(k)
+        w_k = float(post_w[k])
+        mu_post_k = post_a[k] * hill(xs_line, post_kd[k], post_n[k])
         alpha_k = float(0.2 + 0.8 * max(0.0, min(1.0, w_k)))
+        # Shaded ±3σ around each component's posterior-mean curve
+        comp_std_line = jnp.asarray(post_comp_std)[:, k][order]
+        ax.fill_between(
+            xs_line,
+            mu_post_k - 3.0 * comp_std_line,
+            mu_post_k + 3.0 * comp_std_line,
+            color="black",
+            alpha=0.12 * alpha_k,
+            label="component ±3σ" if idx == 0 else None,
+        )
         ax.plot(
             xs_line,
             mu_post_k,
@@ -600,6 +666,8 @@ def _run_top_group_for_current_K():
         out["post_kd"],
         out["post_n"],
         out["post_a"],
+        out["post_comp_mean"],
+        out["post_comp_std"],
         out["last_state"],
         title,
         out_png,
@@ -671,6 +739,8 @@ def _run_for_group(key_tuple, group_df):
         out["post_kd"],
         out["post_n"],
         out["post_a"],
+        out["post_comp_mean"],
+        out["post_comp_std"],
         out["last_state"],
         title,
         out_png,
