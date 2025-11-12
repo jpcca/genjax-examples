@@ -71,20 +71,21 @@ def mix_hill_vec(
 # ------------------------------
 
 
-# MH proposal for (Kd, n): log-space symmetric RW
+# MH proposal for a single (Kd, n): log-space symmetric RW (row-wise)
 @gen
-def rw_globals_prop(Kd_cur, n_cur, step_kd: float, step_n: float):
-    logKd = jnp.log(Kd_cur)
-    logn = jnp.log(n_cur)
+def rw_globals_prop_row(Kd_cur_single, n_cur_single, step_kd: float, step_n: float):
+    logKd = jnp.log(Kd_cur_single)
+    logn = jnp.log(n_cur_single)
 
-    eps_kd = (
-        normal.vmap()(jnp.zeros_like(logKd), step_kd * jnp.ones_like(logKd)) @ "eps_kd"
-    )
-    eps_n = normal.vmap()(jnp.zeros_like(logn), step_n * jnp.ones_like(logn)) @ "eps_n"
+    eps_kd = normal(0.0, step_kd) @ "eps_kd"
+    eps_n = normal(0.0, step_n) @ "eps_n"
 
     Kd_prop = jnp.exp(logKd + eps_kd)
     n_prop = jnp.exp(logn + eps_n)
     return (Kd_prop, n_prop)
+
+# Define vmapped wrapper once and reuse
+rw_globals_prop_row_vmap = rw_globals_prop_row.vmap(in_axes=(0, 0, None, None))
 
 
 # Gibbs proposal for weights: Dirichlet(alpha + counts(z))
@@ -97,18 +98,17 @@ def gibbs_weights_prop(alpha, z_vec):
     return w_new
 
 
-# Gibbs proposal for z (collapsed) 一括
+# Gibbs proposal for a single z_i (collapsed, row-wise)
 @gen
-def gibbs_z_prop(xs, y_vec, weights, Kd, n, sigma):
-    def logits_row(xi, yi):
-        mu_k = hill(jnp.full((3,), xi), Kd, n)  # (3,)
-        ll_k = -0.5 * (jnp.log(2.0 * jnp.pi * sigma**2) + ((yi - mu_k) / sigma) ** 2)
-        return jnp.log(weights + 1e-20) + ll_k  # (3,)
+def gibbs_z_row_prop(xi, yi, weights, Kd, n, sigma):
+    mu_k = hill(jnp.full((3,), xi), Kd, n)  # (3,)
+    ll_k = -0.5 * (jnp.log(2.0 * jnp.pi * sigma**2) + ((yi - mu_k) / sigma) ** 2)
+    logits = jnp.log(weights + 1e-20) + ll_k  # (3,)
+    z_i = categorical(logits) @ "z_i"  # scalar index
+    return z_i
 
-    logits = jax.vmap(logits_row)(xs, y_vec)  # (N, 3)
-    # ★ 行ごとの独立カテゴリカルにする（バッチ化）
-    z = categorical.vmap()(logits) @ "z"  # (N,)
-    return z
+# Define vmapped wrapper once and reuse
+gibbs_z_row_prop_vmap = gibbs_z_row_prop.vmap(in_axes=(0, 0, None, None, None, None))
 
 
 # ------------------------------
@@ -123,9 +123,9 @@ def mh_step_globals(key, trace, model, step_kd: float, step_n: float):
     Kd_cur = chm_cur["clusters/Kd"]
     n_cur = chm_cur["clusters/n"]
 
-    # 対称 RW 提案（log 空間）
+    # 対称 RW 提案（log 空間）: 外側で vmap 適用
     key, sub = jax.random.split(key)
-    Kd_prop, n_prop = rw_globals_prop.simulate(
+    Kd_prop, n_prop = rw_globals_prop_row_vmap.simulate(
         sub, (Kd_cur, n_cur, step_kd, step_n)
     ).get_retval()
 
@@ -169,7 +169,10 @@ def gibbs_step_z(key, trace, model, sigma):
     n = ch["clusters/n"]
 
     key, sub = jax.random.split(key)
-    z_new = gibbs_z_prop.simulate(sub, (xs, y_vec, w, Kd, n, sigma)).get_retval()
+    # 行方向に独立なカテゴリカルを外側で vmap
+    z_new = gibbs_z_row_prop_vmap.simulate(
+        sub, (xs, y_vec, w, Kd, n, sigma)
+    ).get_retval()
     # dtype/shape を明示（int32, (N,)）
     z_new = z_new.astype(jnp.int32).reshape(y_vec.shape)
 
