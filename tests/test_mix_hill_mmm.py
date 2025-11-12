@@ -677,15 +677,25 @@ def _run_for_group(key_tuple, group_df):
     )
 
 
-def test_mmm_three_param_mix_hill_top4():
-    """Run the same modeling/plotting for the top 4 groups by sample size.
-
-    Keeps runtime reasonable while covering multiple combinations.
-    """
+def test_mmm_three_param_mix_hill_top4_K2():
+    """Run top 4 groups with K=2 explicitly."""
+    global K
+    K = 2
     df = pd.read_csv("tests/data/mmm.csv")
     gcols = ["ORGANISATION_SUBVERTICAL", "TERRITORY_NAME", "MARKETING_CHANNEL"]
     grp = df.groupby(gcols)
-    # Pick top 4 groups by size
+    groups_sorted = sorted(grp, key=lambda kv: len(kv[1]), reverse=True)[:4]
+    for key_tuple, gdf in groups_sorted:
+        _run_for_group(key_tuple, gdf)
+
+
+def test_mmm_three_param_mix_hill_top4_K3():
+    """Run top 4 groups with K=3 explicitly."""
+    global K
+    K = 3
+    df = pd.read_csv("tests/data/mmm.csv")
+    gcols = ["ORGANISATION_SUBVERTICAL", "TERRITORY_NAME", "MARKETING_CHANNEL"]
+    grp = df.groupby(gcols)
     groups_sorted = sorted(grp, key=lambda kv: len(kv[1]), reverse=True)[:4]
     for key_tuple, gdf in groups_sorted:
         _run_for_group(key_tuple, gdf)
