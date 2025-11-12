@@ -45,8 +45,9 @@ def mix_hill_vec(
     K = 3
 
     w = dirichlet(alpha) @ "weights"  # (K,)
-    Kd = gamma(shape_kd, rate_kd, sample_shape=Const((K,))) @ ("clusters", "Kd")  # (K,)
-    n = gamma(shape_n, rate_n, sample_shape=Const((K,))) @ ("clusters", "n")  # (K,)
+    # Use flat string addresses to avoid mixed key types in pytrees
+    Kd = gamma(shape_kd, rate_kd, sample_shape=Const((K,))) @ "clusters/Kd"  # (K,)
+    n = gamma(shape_n, rate_n, sample_shape=Const((K,))) @ "clusters/n"  # (K,)
 
     z = categorical(w, sample_shape=Const((N,))) @ "z"  # (N,)
 
@@ -119,8 +120,8 @@ def mh_step_globals(key, trace, model, step_kd: float, step_n: float):
     """(Kd, n) を対称 RW 提案で MH。提案は simulate で取り、assess は使わない。"""
     argdiffs = Diff.no_change(trace.get_args())
     chm_cur = trace.get_choices()
-    Kd_cur = chm_cur["clusters", "Kd"]
-    n_cur = chm_cur["clusters", "n"]
+    Kd_cur = chm_cur["clusters/Kd"]
+    n_cur = chm_cur["clusters/n"]
 
     # 対称 RW 提案（log 空間）
     key, sub = jax.random.split(key)
@@ -130,8 +131,8 @@ def mh_step_globals(key, trace, model, step_kd: float, step_n: float):
 
     # 提案をモデルに適用
     chm = ChoiceMap.empty()
-    chm = chm.at["clusters", "Kd"].set(Kd_prop)
-    chm = chm.at["clusters", "n"].set(n_prop)
+    chm = chm.at["clusters/Kd"].set(Kd_prop)
+    chm = chm.at["clusters/n"].set(n_prop)
 
     key, sub = jax.random.split(key)
     new_trace, model_logw, _, _ = model.update(sub, trace, chm, argdiffs)
@@ -139,7 +140,8 @@ def mh_step_globals(key, trace, model, step_kd: float, step_n: float):
     # 対称提案なので fwd/bwd は 0、受容確率は model_logw のみで決まる
     key, sub = jax.random.split(key)
     accept = jnp.log(jax.random.uniform(sub)) < model_logw
-    out_trace = new_trace if bool(accept) else trace
+    # Use lax.cond to select traces under JIT/scan
+    out_trace = jax.lax.cond(accept, lambda _: new_trace, lambda _: trace, operand=None)
     return key, out_trace, accept, model_logw
 
 
@@ -163,8 +165,8 @@ def gibbs_step_z(key, trace, model, sigma):
     xs = trace.get_args()[0]
     y_vec = ch["y"]
     w = ch["weights"]
-    Kd = ch["clusters", "Kd"]
-    n = ch["clusters", "n"]
+    Kd = ch["clusters/Kd"]
+    n = ch["clusters/n"]
 
     key, sub = jax.random.split(key)
     z_new = gibbs_z_prop.simulate(sub, (xs, y_vec, w, Kd, n, sigma)).get_retval()
@@ -198,12 +200,27 @@ def run_inference_genjax_only(
     alpha = model_args[1]
     sigma = model_args[-1]
 
-    for _ in range(n_rounds):
-        key, trace, _, _ = mh_step_globals(key, trace, model, mh_step_kd, mh_step_n)
-        if do_gibbs_z:
-            key, trace = gibbs_step_z(key, trace, model, sigma)
-        if do_gibbs_w:
-            key, trace = gibbs_step_weights(key, trace, model, alpha)
+    # JIT-friendly loop with lax.scan; guard Gibbs steps via lax.cond
+    def _step(carry, _):
+        key_s, trace_s = carry
+        key_s, trace_s, _, _ = mh_step_globals(
+            key_s, trace_s, model, mh_step_kd, mh_step_n
+        )
+        key_s, trace_s = jax.lax.cond(
+            do_gibbs_z,
+            lambda kt: gibbs_step_z(kt[0], kt[1], model, sigma),
+            lambda kt: kt,
+            (key_s, trace_s),
+        )
+        key_s, trace_s = jax.lax.cond(
+            do_gibbs_w,
+            lambda kt: gibbs_step_weights(kt[0], kt[1], model, alpha),
+            lambda kt: kt,
+            (key_s, trace_s),
+        )
+        return (key_s, trace_s), None
+
+    (key, trace), _ = jax.lax.scan(_step, (key, trace), xs=None, length=n_rounds)
     return trace
 
 
@@ -228,8 +245,8 @@ def test_main():
     tr_true = mix_hill_vec.simulate(sub, args)
     ch_true = tr_true.get_choices()
     print("[truth] weights:", ch_true["weights"])
-    print("[truth] Kd:", ch_true["clusters", "Kd"])
-    print("[truth] n :", ch_true["clusters", "n"])
+    print("[truth] Kd:", ch_true["clusters/Kd"])
+    print("[truth] n :", ch_true["clusters/n"])
 
     y_obs = ch_true["y"]
     obs = make_obs_from_y(y_obs)
@@ -249,8 +266,8 @@ def test_main():
 
     ch = tr_post.get_choices()
     print("[posterior] weights:", ch["weights"])
-    print("[posterior] Kd     :", ch["clusters", "Kd"])
-    print("[posterior] n      :", ch["clusters", "n"])
+    print("[posterior] Kd     :", ch["clusters/Kd"])
+    print("[posterior] n      :", ch["clusters/n"])
     print("z head:", ch["z"][:10])
 
     assert jnp.all(ch["weights"] >= 0) and jnp.isclose(
