@@ -431,7 +431,9 @@ def run_mcmc(
         # Accumulate per-component predictive mean moments at observed xs
         # Build (N,K) base curve values, then scale by A
         xs_safe = jnp.maximum(xs, 1e-6)
-        base = 1.0 / (1.0 + (st.Kd[None, :] / xs_safe[:, None]) ** st.n[None, :])  # (N,K)
+        base = 1.0 / (
+            1.0 + (st.Kd[None, :] / xs_safe[:, None]) ** st.n[None, :]
+        )  # (N,K)
         mu_all = base * st.A[None, :]  # (N,K)
         sum_comp_mu = jnp.where(do_keep, sum_comp_mu + mu_all, sum_comp_mu)
         sum_comp_mu2 = jnp.where(do_keep, sum_comp_mu2 + mu_all * mu_all, sum_comp_mu2)
@@ -483,9 +485,7 @@ def run_mcmc(
         acc_n_sum,
         acc_a_sum,
         kept,
-    ), _ = (
-        lax.scan(one_step, carry0, xs=None, length=cfg.num_iters)
-    )
+    ), _ = lax.scan(one_step, carry0, xs=None, length=cfg.num_iters)
     kept = jnp.maximum(kept, 1)
     denom = kept.astype(sum_comp_mu.dtype)
     post_w = sum_w / kept
@@ -493,7 +493,9 @@ def run_mcmc(
     post_n = sum_n / kept
     post_a = sum_a / kept
     post_comp_mean = sum_comp_mu / denom
-    post_comp_var = jnp.maximum(0.0, sum_comp_mu2 / denom - post_comp_mean * post_comp_mean)
+    post_comp_var = jnp.maximum(
+        0.0, sum_comp_mu2 / denom - post_comp_mean * post_comp_mean
+    )
     post_comp_std = jnp.sqrt(post_comp_var)
     acc_kd_rate = acc_kd_sum / cfg.num_iters
     acc_n_rate = acc_n_sum / cfg.num_iters
