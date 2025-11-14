@@ -81,23 +81,51 @@ def hill_mixture_model(
 """Proposals using propose/assess to directly produce ChoiceMap for model.update."""
 
 
-# MH proposal for global params (Kd, n): independent gamma proposal at model addresses
-@gen
-def prop_globals(trace, *model_args):
-    chm_cur = trace.get_choices()
-    K = chm_cur["clusters/Kd"].shape[0]
+"""Random-walk proposals for globals (Kd, n) in log-space.
 
-    # Unpack model args to reuse prior hyperparams
-    # args = (xs, alpha, shape_kd, rate_kd, shape_n, rate_n, sigma)
-    shape_kd = model_args[2]
-    rate_kd = model_args[3]
-    shape_n = model_args[4]
-    rate_n = model_args[5]
+The prior-independent proposals led to poor mixing when data are abundant and
+noise is small. We switch to symmetric random-walk proposals in log-space and
+update parameters locally per-cluster and per-parameter to improve acceptance.
+"""
 
-    # Directly sample at model addresses so propose() returns a ChoiceMap usable by model.update
-    Kd_prop = gamma(shape_kd, rate_kd, sample_shape=Const((K,))) @ "clusters/Kd"
-    n_prop = gamma(shape_n, rate_n, sample_shape=Const((K,))) @ "clusters/n"
-    return None
+
+def _mh_rw_one(key, trace, model, address: str, idx: int, step: float):
+    """One MH random-walk update on log-parameter for a single index.
+
+    - address: one of "clusters/Kd" or "clusters/n"
+    - idx: which cluster index to update
+    - step: stddev of the additive noise in log-space
+
+    Uses model.update to compute the log target ratio; adds the Hastings
+    correction (z' - z) arising from the exp transform when proposing in
+    log-space.
+    """
+    argdiffs = Diff.no_change(trace.get_args())
+
+    ch = trace.get_choices()
+    cur_vec = ch[address]
+    x_cur = cur_vec[idx]
+    z_cur = jnp.log(jnp.maximum(x_cur, 1e-20))
+
+    key, sub = jax.random.split(key)
+    z_prop = z_cur + step * jax.random.normal(sub)
+    x_prop = jnp.exp(z_prop)
+
+    prop_vec = cur_vec.at[idx].set(x_prop)
+    prop_cm = ChoiceMap.empty()
+    prop_cm = prop_cm.at[address].set(prop_vec)
+
+    key, sub = jax.random.split(key)
+    new_trace, model_logw, _, _ = model.update(sub, trace, prop_cm, argdiffs)
+
+    # Hastings correction for proposing in log-space: log q(x|x') - log q(x'|x) = z' - z
+    delta_log_q = z_prop - z_cur
+    alpha = model_logw + delta_log_q
+
+    key, sub = jax.random.split(key)
+    accept = jnp.log(jax.random.uniform(sub)) < alpha
+    out_trace = jax.lax.cond(accept, lambda _: new_trace, lambda _: trace, operand=None)
+    return key, out_trace
 
 
 # Gibbs-style proposal for weights using propose/assess directly on model address
@@ -151,31 +179,23 @@ def prop_z(trace, *model_args):
 # ------------------------------
 
 
-def mh_step_globals(key, trace, model, _step_kd: float, _step_n: float):
-    """MH step for (Kd, n) using independent gamma proposals at model addresses.
-    Uses proposal.propose/assess + model.update to compute the acceptance ratio.
+def mh_step_globals_rw(key, trace, model, step_kd: float, step_n: float):
+    """One sweep of local RW updates over all clusters for Kd and n.
+
+    Proposes in log-space with Normal(0, step^2) increments and includes the
+    Hastings correction. Updates K components sequentially using a JAX fori_loop.
     """
-    argdiffs = Diff.no_change(trace.get_args())
+    ch = trace.get_choices()
+    K = ch["clusters/Kd"].shape[0]
 
-    model_args = trace.get_args()
+    def body(i, carry):
+        key_s, trace_s = carry
+        key_s, trace_s = _mh_rw_one(key_s, trace_s, model, "clusters/Kd", i, step_kd)
+        key_s, trace_s = _mh_rw_one(key_s, trace_s, model, "clusters/n", i, step_n)
+        return (key_s, trace_s)
 
-    # Forward proposal: returns ChoiceMap aligned with model addresses
-    key, sub = jax.random.split(key)
-    fwd_choices, fwd_weight, _ = prop_globals.propose(sub, (trace, *model_args))
-
-    # Update model with proposed choices
-    key, sub = jax.random.split(key)
-    new_trace, model_logw, _, discard = model.update(sub, trace, fwd_choices, argdiffs)
-
-    # Backward weight (likelihood of returning to old under proposal)
-    bwd_weight, _ = prop_globals.assess(discard, (new_trace, *model_args))
-
-    # MH acceptance ratio
-    alpha = model_logw - fwd_weight + bwd_weight
-    key, sub = jax.random.split(key)
-    accept = jnp.log(jax.random.uniform(sub)) < alpha
-    out_trace = jax.lax.cond(accept, lambda _: new_trace, lambda _: trace, operand=None)
-    return key, out_trace, accept, alpha
+    key, trace = jax.lax.fori_loop(0, K, body, (key, trace))
+    return key, trace
 
 
 def mh_step_weights(key, trace, model, alpha):
@@ -252,7 +272,7 @@ def run_inference(
     def _step(carry, i):
         key_s, trace_s, sum_w_s, sum_kd_s, sum_n_s, cnt_s = carry
 
-        key_s, trace_s, _, _ = mh_step_globals(
+        key_s, trace_s = mh_step_globals_rw(
             key_s, trace_s, model, mh_step_kd, mh_step_n
         )
         # Always update z and weights
@@ -299,7 +319,7 @@ def make_obs_from_y(y_obs):
 
 
 def test_main():
-    key = jax.random.PRNGKey(314159)
+    key = jax.random.PRNGKey(123)
     xs = jnp.linspace(1.0, 100.0, 1000)
     alpha = jnp.ones(3)
     args = (xs, alpha, 100.0, 5.0, 4.0, 2.0, 0.05)
@@ -320,11 +340,11 @@ def test_main():
         hill_mixture_model,
         args,
         obs,
-        n_rounds=2000,
+        n_rounds=10000,
         mh_step_kd=0.03,
         mh_step_n=0.03,
         burn_in=1000,
-        thin=20,
+        thin=5,
     )
 
     ch = tr_post.get_choices()
