@@ -28,8 +28,9 @@ def log_normal_pdf(y, mu, sigma):
 # Components (top-level)
 # ------------------------------
 @gen
-def hill_mu_component(xi, kd, n_k):
+def hill_mu_component(xi, kd, n_k, alpha_k):
     mu = hill(xi, kd, n_k)
+    mu = alpha_k * mu
     return mu
 
 
@@ -45,6 +46,8 @@ def hill_mixture_model(
     shape_n=4.0,
     rate_n=2.0,
     sigma=0.02,
+    shape_alpha=5.0,
+    rate_alpha=5.0,
 ):
     K = 3
 
@@ -52,6 +55,9 @@ def hill_mixture_model(
     w = dirichlet(alpha) @ "weights"  # (K,)
     Kd = gamma(shape_kd, rate_kd, sample_shape=Const((K,))) @ "clusters/Kd"  # (K,)
     n = gamma(shape_n, rate_n, sample_shape=Const((K,))) @ "clusters/n"  # (K,)
+    Alpha = gamma(
+        shape_alpha, rate_alpha, sample_shape=Const((K,))
+    ) @ "clusters/alpha"  # (K,)
 
     # Build 3-component mixture and vmap over observations
     logits = jnp.log(w + 1e-20)
@@ -59,14 +65,19 @@ def hill_mixture_model(
     mix3_vm = mix3.vmap(
         in_axes=(
             None,  # logits shared across rows
-            (0, None, None),  # args for comp 1: (xs, Kd[0], n[0])
-            (0, None, None),  # args for comp 2
-            (0, None, None),  # args for comp 3
+            (0, None, None, None),  # args for comp 1: (xs, Kd[0], n[0], Alpha[0])
+            (0, None, None, None),  # args for comp 2
+            (0, None, None, None),  # args for comp 3
         )
     )
 
     mu_vec = (
-        mix3_vm(logits, (xs, Kd[0], n[0]), (xs, Kd[1], n[1]), (xs, Kd[2], n[2]))
+        mix3_vm(
+            logits,
+            (xs, Kd[0], n[0], Alpha[0]),
+            (xs, Kd[1], n[1], Alpha[1]),
+            (xs, Kd[2], n[2], Alpha[2]),
+        )
         @ "y_mix"
     )
     y = normal(mu_vec, sigma) @ "y"
@@ -152,15 +163,15 @@ def prop_z(trace, *model_args):
     w = ch["weights"]  # (K,)
     Kd = ch["clusters/Kd"]  # (K,)
     n = ch["clusters/n"]  # (K,)
+    Alpha = ch["clusters/alpha"]  # (K,)
     sigma = model_args[-1]
 
     # Compute per-row logits (N,K)
-    xs_safe = jnp.maximum(xs, 1e-6)
     mu_all = jnp.stack(
         [
-            1.0 / (1.0 + (Kd[0] / xs_safe) ** n[0]),
-            1.0 / (1.0 + (Kd[1] / xs_safe) ** n[1]),
-            1.0 / (1.0 + (Kd[2] / xs_safe) ** n[2]),
+            Alpha[0] * hill(xs, Kd[0], n[0]),
+            Alpha[1] * hill(xs, Kd[1], n[1]),
+            Alpha[2] * hill(xs, Kd[2], n[2]),
         ],
         axis=1,
     )  # (N, K)
@@ -179,8 +190,10 @@ def prop_z(trace, *model_args):
 # ------------------------------
 
 
-def mh_step_globals_rw(key, trace, model, step_kd: float, step_n: float):
-    """One sweep of local RW updates over all clusters for Kd and n.
+def mh_step_globals_rw(
+    key, trace, model, step_kd: float, step_n: float, step_alpha: float
+):
+    """One sweep of local RW updates over all clusters for Kd, n, and alpha.
 
     Proposes in log-space with Normal(0, step^2) increments and includes the
     Hastings correction. Updates K components sequentially using a JAX fori_loop.
@@ -192,6 +205,9 @@ def mh_step_globals_rw(key, trace, model, step_kd: float, step_n: float):
         key_s, trace_s = carry
         key_s, trace_s = _mh_rw_one(key_s, trace_s, model, "clusters/Kd", i, step_kd)
         key_s, trace_s = _mh_rw_one(key_s, trace_s, model, "clusters/n", i, step_n)
+        key_s, trace_s = _mh_rw_one(
+            key_s, trace_s, model, "clusters/alpha", i, step_alpha
+        )
         return (key_s, trace_s)
 
     key, trace = jax.lax.fori_loop(0, K, body, (key, trace))
@@ -254,6 +270,7 @@ def run_inference(
     n_rounds=200,
     mh_step_kd=0.03,
     mh_step_n=0.03,
+    mh_step_alpha=0.03,
     burn_in: int = 0,
     thin: int = 1,
 ):
@@ -267,13 +284,14 @@ def run_inference(
     sum_w = jnp.zeros_like(ch0["weights"])  # (K,)
     sum_kd = jnp.zeros_like(ch0["clusters/Kd"])  # (K,)
     sum_n = jnp.zeros_like(ch0["clusters/n"])  # (K,)
+    sum_alpha = jnp.zeros_like(ch0["clusters/alpha"])  # (K,)
     count = jnp.array(0, dtype=jnp.int32)
 
     def _step(carry, i):
-        key_s, trace_s, sum_w_s, sum_kd_s, sum_n_s, cnt_s = carry
+        key_s, trace_s, sum_w_s, sum_kd_s, sum_n_s, sum_alpha_s, cnt_s = carry
 
         key_s, trace_s = mh_step_globals_rw(
-            key_s, trace_s, model, mh_step_kd, mh_step_n
+            key_s, trace_s, model, mh_step_kd, mh_step_n, mh_step_alpha
         )
         # Always update z and weights
         key_s, trace_s = mh_step_z(key_s, trace_s, model, sigma)
@@ -285,13 +303,14 @@ def run_inference(
         sum_w_s = jnp.where(take, sum_w_s + ch_s["weights"], sum_w_s)
         sum_kd_s = jnp.where(take, sum_kd_s + ch_s["clusters/Kd"], sum_kd_s)
         sum_n_s = jnp.where(take, sum_n_s + ch_s["clusters/n"], sum_n_s)
+        sum_alpha_s = jnp.where(take, sum_alpha_s + ch_s["clusters/alpha"], sum_alpha_s)
         cnt_s = cnt_s + jnp.where(take, 1, 0)
 
-        return (key_s, trace_s, sum_w_s, sum_kd_s, sum_n_s, cnt_s), None
+        return (key_s, trace_s, sum_w_s, sum_kd_s, sum_n_s, sum_alpha_s, cnt_s), None
 
-    (key, trace, sum_w, sum_kd, sum_n, count), _ = jax.lax.scan(
+    (key, trace, sum_w, sum_kd, sum_n, sum_alpha, count), _ = jax.lax.scan(
         _step,
-        (key, trace, sum_w, sum_kd, sum_n, count),
+        (key, trace, sum_w, sum_kd, sum_n, sum_alpha, count),
         xs=jnp.arange(n_rounds),
         length=n_rounds,
     )
@@ -302,6 +321,7 @@ def run_inference(
         "weights": sum_w / denom,
         "clusters/Kd": sum_kd / denom,
         "clusters/n": sum_n / denom,
+        "clusters/alpha": sum_alpha / denom,
     }
 
     return trace, post_means
@@ -330,6 +350,7 @@ def test_main():
     print("[truth] weights:", ch_true["weights"])
     print("[truth] Kd:", ch_true["clusters/Kd"])
     print("[truth] n :", ch_true["clusters/n"])
+    print("[truth] alpha :", ch_true["clusters/alpha"])
 
     y_obs = ch_true["y"]
     obs = make_obs_from_y(y_obs)
@@ -351,6 +372,7 @@ def test_main():
     print("[posterior mean] weights:", post_means["weights"])
     print("[posterior mean] Kd     :", post_means["clusters/Kd"])
     print("[posterior mean] n      :", post_means["clusters/n"])
+    print("[posterior mean] alpha  :", post_means["clusters/alpha"])
     print("z head:", ch["y_mix", "mixture_component"][:10])
 
     assert jnp.all(ch["weights"] >= 0) and jnp.isclose(
