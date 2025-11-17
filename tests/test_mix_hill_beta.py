@@ -55,9 +55,9 @@ def hill_mixture_model(
     w = dirichlet(alpha) @ "weights"  # (K,)
     Kd = gamma(shape_kd, rate_kd, sample_shape=Const((K,))) @ "clusters/Kd"  # (K,)
     n = gamma(shape_n, rate_n, sample_shape=Const((K,))) @ "clusters/n"  # (K,)
-    Alpha = gamma(
-        shape_alpha, rate_alpha, sample_shape=Const((K,))
-    ) @ "clusters/alpha"  # (K,)
+    Alpha = (
+        gamma(shape_alpha, rate_alpha, sample_shape=Const((K,))) @ "clusters/alpha"
+    )  # (K,)
 
     # Build 3-component mixture and vmap over observations
     logits = jnp.log(w + 1e-20)
@@ -85,6 +85,12 @@ def hill_mixture_model(
 
 
 # ------------------------------
+# Jitted update for hill_mixture_model
+# ------------------------------
+jitted_update = jax.jit(hill_mixture_model.update)
+
+
+# ------------------------------
 # Proposals
 # ------------------------------
 
@@ -100,7 +106,7 @@ update parameters locally per-cluster and per-parameter to improve acceptance.
 """
 
 
-def _mh_rw_one(key, trace, model, address: str, idx: int, step: float):
+def _mh_rw_one(key, trace, address: str, idx: int, step: float):
     """One MH random-walk update on log-parameter for a single index.
 
     - address: one of "clusters/Kd" or "clusters/n"
@@ -127,7 +133,7 @@ def _mh_rw_one(key, trace, model, address: str, idx: int, step: float):
     prop_cm = prop_cm.at[address].set(prop_vec)
 
     key, sub = jax.random.split(key)
-    new_trace, model_logw, _, _ = model.update(sub, trace, prop_cm, argdiffs)
+    new_trace, model_logw, _, _ = jitted_update(sub, trace, prop_cm, argdiffs)
 
     # Hastings correction for proposing in log-space: log q(x|x') - log q(x'|x) = z' - z
     delta_log_q = z_prop - z_cur
@@ -190,9 +196,7 @@ def prop_z(trace, *model_args):
 # ------------------------------
 
 
-def mh_step_globals_rw(
-    key, trace, model, step_kd: float, step_n: float, step_alpha: float
-):
+def mh_step_globals_rw(key, trace, step_kd: float, step_n: float, step_alpha: float):
     """One sweep of local RW updates over all clusters for Kd, n, and alpha.
 
     Proposes in log-space with Normal(0, step^2) increments and includes the
@@ -203,18 +207,16 @@ def mh_step_globals_rw(
 
     def body(i, carry):
         key_s, trace_s = carry
-        key_s, trace_s = _mh_rw_one(key_s, trace_s, model, "clusters/Kd", i, step_kd)
-        key_s, trace_s = _mh_rw_one(key_s, trace_s, model, "clusters/n", i, step_n)
-        key_s, trace_s = _mh_rw_one(
-            key_s, trace_s, model, "clusters/alpha", i, step_alpha
-        )
+        key_s, trace_s = _mh_rw_one(key_s, trace_s, "clusters/Kd", i, step_kd)
+        key_s, trace_s = _mh_rw_one(key_s, trace_s, "clusters/n", i, step_n)
+        key_s, trace_s = _mh_rw_one(key_s, trace_s, "clusters/alpha", i, step_alpha)
         return (key_s, trace_s)
 
     key, trace = jax.lax.fori_loop(0, K, body, (key, trace))
     return key, trace
 
 
-def mh_step_weights(key, trace, model, alpha):
+def mh_step_weights(key, trace, alpha):
     """Update weights | z via Dirichlet conditional using propose/assess.
     This is a Gibbs-style move; acceptance should be ~1 in theory, but we still
     run the generic MH accept/reject for consistency.
@@ -226,7 +228,7 @@ def mh_step_weights(key, trace, model, alpha):
     fwd_choices, fwd_weight, _ = prop_weights.propose(sub, (trace, *model_args))
 
     key, sub = jax.random.split(key)
-    new_trace, model_logw, _, discard = model.update(sub, trace, fwd_choices, argdiffs)
+    new_trace, model_logw, _, discard = jitted_update(sub, trace, fwd_choices, argdiffs)
 
     bwd_weight, _ = prop_weights.assess(discard, (new_trace, *model_args))
 
@@ -237,7 +239,7 @@ def mh_step_weights(key, trace, model, alpha):
     return key, out_trace
 
 
-def mh_step_z(key, trace, model, sigma):
+def mh_step_z(key, trace, sigma):
     """Update z | rest using collapsed categorical via propose/assess."""
     argdiffs = Diff.no_change(trace.get_args())
     model_args = trace.get_args()
@@ -246,7 +248,7 @@ def mh_step_z(key, trace, model, sigma):
     fwd_choices, fwd_weight, _ = prop_z.propose(sub, (trace, *model_args))
 
     key, sub = jax.random.split(key)
-    new_trace, model_logw, _, discard = model.update(sub, trace, fwd_choices, argdiffs)
+    new_trace, model_logw, _, discard = jitted_update(sub, trace, fwd_choices, argdiffs)
 
     bwd_weight, _ = prop_z.assess(discard, (new_trace, *model_args))
 
@@ -291,11 +293,11 @@ def run_inference(
         key_s, trace_s, sum_w_s, sum_kd_s, sum_n_s, sum_alpha_s, cnt_s = carry
 
         key_s, trace_s = mh_step_globals_rw(
-            key_s, trace_s, model, mh_step_kd, mh_step_n, mh_step_alpha
+            key_s, trace_s, mh_step_kd, mh_step_n, mh_step_alpha
         )
         # Always update z and weights
-        key_s, trace_s = mh_step_z(key_s, trace_s, model, sigma)
-        key_s, trace_s = mh_step_weights(key_s, trace_s, model, alpha)
+        key_s, trace_s = mh_step_z(key_s, trace_s, sigma)
+        key_s, trace_s = mh_step_weights(key_s, trace_s, alpha)
 
         # Accumulate running sums with burn-in and thinning
         ch_s = trace_s.get_choices()

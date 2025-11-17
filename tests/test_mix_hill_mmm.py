@@ -1,4 +1,4 @@
-from typing import NamedTuple, Dict, Tuple
+from typing import NamedTuple, Dict, Tuple, Any
 
 import csv
 import collections
@@ -9,6 +9,8 @@ from jax import lax, vmap, jit
 
 from genjax import gen, Const  # type: ignore
 from genjax import normal, gamma, dirichlet, mix  # type: ignore
+from genjax import ChoiceMapBuilder as C  # type: ignore
+from genjax._src.core.compiler.interpreters.incremental import Diff  # type: ignore
 
 import matplotlib.pyplot as plt
 
@@ -63,14 +65,14 @@ def mix_hill(
     # Mixture weights
     weights = dirichlet(alpha) @ "weights"  # (NUM_COMPONENTS,)
 
-    # Cluster parameters (Kd, n)
-    Kd = gamma(shape_kd, rate_kd, sample_shape=Const((NUM_COMPONENTS,))) @ (
-        "clusters",
-        "Kd",
+    # Cluster parameters (Kd, n). Use flat string addresses to keep
+    # trace subtraces using only string keys (avoids JAX PyTree dict
+    # key sorting issues when jitting over traces).
+    Kd = (
+        gamma(shape_kd, rate_kd, sample_shape=Const((NUM_COMPONENTS,))) @ "clusters/Kd"
     )  # (NUM_COMPONENTS,)
-    n = gamma(shape_n, rate_n, sample_shape=Const((NUM_COMPONENTS,))) @ (
-        "clusters",
-        "n",
+    n = (
+        gamma(shape_n, rate_n, sample_shape=Const((NUM_COMPONENTS,))) @ "clusters/n"
     )  # (NUM_COMPONENTS,)
 
     # Build mixture with mix combinator and vmap over observations
@@ -253,10 +255,7 @@ class HillMMMCMCConfig(NamedTuple):
 
 class HillMMMCMCState(NamedTuple):
     key: jax.Array
-    weights: jnp.ndarray  # (NUM_COMPONENTS,)
-    z: jnp.ndarray  # (N,)
-    Kd: jnp.ndarray  # (NUM_COMPONENTS,)
-    n: jnp.ndarray  # (NUM_COMPONENTS,)
+    trace: Any
 
 
 @jit
@@ -273,21 +272,40 @@ def mcmc_step(
     mh_cfg: HillMHConfig,
 ) -> Tuple[HillMMMCMCState, Tuple[jnp.ndarray, jnp.ndarray]]:
     key = state.key
+    trace = state.trace
 
-    # z | rest (collapsed Gibbs)
-    key, z = sample_assignments(key, xs, ys, state.weights, state.Kd, state.n, sigma)
+    # Current choices from trace
+    ch = trace.get_choices()
+    weights = ch["weights"]
+    Kd = ch["clusters/Kd"]
+    n = ch["clusters/n"]
 
-    # w | z (Gibbs)
+    # z | rest (collapsed Gibbs) then update trace
+    key, z = sample_assignments(key, xs, ys, weights, Kd, n, sigma)
+    argdiffs = Diff.no_change(trace.get_args())
+    key, sub = jax.random.split(key)
+    trace, _, _, _ = trace.update(sub, C["y_mix", "mixture_component"].set(z), argdiffs)
+
+    # w | z (Gibbs) then update trace
+    ch = trace.get_choices()
+    z = ch["y_mix", "mixture_component"]
     key, w = sample_mixture_weights(key, alpha, z)
+    argdiffs = Diff.no_change(trace.get_args())
+    key, sub = jax.random.split(key)
+    trace, _, _, _ = trace.update(sub, C["weights"].set(w), argdiffs)
 
-    # (Kd, n) | rest (MH)
+    # (Kd, n) | rest (MH) then update trace
+    ch = trace.get_choices()
+    z = ch["y_mix", "mixture_component"]
+    Kd = ch["clusters/Kd"]
+    n = ch["clusters/n"]
     key, Kd_new, n_new, acc_kd, acc_n = mh_update_params(
         key,
         xs,
         ys,
         z,
-        state.Kd,
-        state.n,
+        Kd,
+        n,
         sigma,
         shape_kd,
         rate_kd,
@@ -295,8 +313,12 @@ def mcmc_step(
         rate_n,
         mh_cfg,
     )
+    argdiffs = Diff.no_change(trace.get_args())
+    key, sub = jax.random.split(key)
+    cm_update = C["clusters/Kd"].set(Kd_new) | C["clusters/n"].set(n_new)
+    trace, _, _, _ = trace.update(sub, cm_update, argdiffs)
 
-    new_state = HillMMMCMCState(key, w, z, Kd_new, n_new)
+    new_state = HillMMMCMCState(key, trace)
     return new_state, (acc_kd, acc_n)
 
 
@@ -312,16 +334,13 @@ def run_hill_mmm_mcmc(
     sigma: float,
     cfg: HillMMMCMCConfig,
 ) -> Dict[str, jnp.ndarray]:
-    # Initialise from prior via GenJAX model
+    # Initialise trace via GenJAX model conditioned on observations
     key, sub = jax.random.split(key)
-    tr = mix_hill.simulate(sub, (xs, alpha, shape_kd, rate_kd, shape_n, rate_n, sigma))
-    ch = tr.get_choices()
-    w0 = ch["weights"]
-    Kd0 = ch[("clusters", "Kd")]
-    n0 = ch[("clusters", "n")]
-
-    key, z0 = sample_assignments(key, xs, ys, w0, Kd0, n0, sigma)
-    state = HillMMMCMCState(key, w0, z0, Kd0, n0)
+    obs = C["y"].set(ys)
+    trace, _ = mix_hill.importance(
+        sub, obs, (xs, alpha, shape_kd, rate_kd, shape_n, rate_n, sigma)
+    )
+    state = HillMMMCMCState(key, trace)
 
     mh_cfg = HillMHConfig(cfg.mh_step_kd, cfg.mh_step_n)
 
@@ -334,11 +353,12 @@ def run_hill_mmm_mcmc(
 
         def do_keep(args):
             st, sum_w, sum_kd, sum_n, acc_kd_sum, acc_n_sum, kept = args
+            ch = st.trace.get_choices()
             return (
                 st,
-                sum_w + st.weights,
-                sum_kd + st.Kd,
-                sum_n + st.n,
+                sum_w + ch["weights"],
+                sum_kd + ch["clusters/Kd"],
+                sum_n + ch["clusters/n"],
                 acc_kd_sum + acc_kd,
                 acc_n_sum + acc_n,
                 kept + 1,
@@ -443,8 +463,10 @@ def _plot_group_mmm(xs, ys, out, title, out_png, y_scale: float):
             sigma,
             mh_cfg,
         )
+        ch = st.trace.get_choices()
         for k in range(NUM_COMPONENTS):
-            mu_k = hill(xs_line, st.Kd[k], st.n[k]) * y_scale
+            mu_k = hill(xs_line, ch["clusters/Kd"][k], ch["clusters/n"][k])
+            mu_k = mu_k * y_scale
             mu_s = mu_s.at[i, k, :].set(mu_k)
         return (st, mu_s), None
 
